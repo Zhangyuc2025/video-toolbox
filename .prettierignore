@@ -1,0 +1,62 @@
+# Dependencies
+node_modules
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# Build outputs
+dist
+dist-ssr
+build
+.output
+.nuxt
+
+# Rust build
+src-tauri/target
+src-tauri/Cargo.lock
+
+# Python
+*.pyc
+__pycache__
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist-python
+build-python
+.eggs
+
+# IDEs
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Cache
+.cache
+.temp
+.tmp
+
+# Coverage
+coverage
+.nyc_output
+
+# Generated files
+*.min.js
+*.min.css

@@ -1,0 +1,24 @@
+@import './reset.css';
+@import './nprogress.css';
+@import './transition.css';
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+html {
+  overflow-x: hidden;
+  color: rgb(var(--base-text-color));
+}
+
+/* 调整通知位置，避免遮挡底部按钮 */
+.n-notification-container.n-notification-container--bottom-right {
+  bottom: 80px !important; /* 向上移动，默认是 24px */
+}
+
+/* 调整通知阴影为细微效果 */
+.n-notification {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08) !important;
+}

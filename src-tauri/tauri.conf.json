@@ -1,0 +1,61 @@
+{
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build",
+    "devPath": "http://localhost:9527",
+    "distDir": "../dist",
+    "withGlobalTauri": false
+  },
+  "package": {
+    "productName": "视频号工具箱",
+    "version": "1.0.0"
+  },
+  "tauri": {
+    "allowlist": {
+      "all": false,
+      "shell": {
+        "all": false,
+        "open": true
+      },
+      "fs": {
+        "all": true,
+        "scope": ["$APPDATA/*", "$APPCONFIG/*"]
+      },
+      "path": {
+        "all": true
+      }
+    },
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://permanent-link-service.zhangyuc2020.workers.dev/api/updater/check/{{target}}/{{current_version}}"
+      ],
+      "dialog": false,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlBNkVFODQwM0MwQkUyRTIKUldUaTRnczhRT2h1bWt5ZklqS0VKRW0xRkt4MkJ6R25wRVI2NEhhYjVvamlCdXlWYkVUUUJvUS8K"
+    },
+    "bundle": {
+      "active": true,
+      "targets": ["nsis", "updater"],
+      "identifier": "com.videotoolbox.app",
+      "icon": [
+        "icons/icon.ico"
+      ],
+      "externalBin": [],
+      "resources": []
+    },
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "fullscreen": false,
+        "resizable": true,
+        "title": "视频号工具箱",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600
+      }
+    ]
+  }
+}

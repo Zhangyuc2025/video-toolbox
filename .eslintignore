@@ -1,0 +1,33 @@
+# Dependencies
+node_modules
+
+# Build outputs
+dist
+dist-ssr
+build
+.output
+
+# Rust
+src-tauri/target
+
+# Python
+*.pyc
+__pycache__
+python-backend/dist
+python-backend/build
+
+# Auto-generated
+*.d.ts
+!src/typings/*.d.ts
+
+# Config files
+*.config.js
+*.config.ts
+!vite.config.ts
+
+# Coverage
+coverage
+
+# IDEs
+.vscode
+.idea

@@ -1,0 +1,131 @@
+/**
+ * Cookie和账号信息相关类型定义
+ * 注意：Cookie不再存储在本地，改为从BitBrowser实时读取
+ */
+declare namespace Cookie {
+  /** Cookie基本结构（从BitBrowser读取） */
+  interface Cookie {
+    /** Cookie名称 */
+    name: string;
+    /** Cookie值 */
+    value: string;
+    /** 域名 */
+    domain: string;
+    /** 路径 */
+    path?: string;
+    /** 过期时间（Unix时间戳，秒） */
+    expires?: number;
+    /** 是否HttpOnly */
+    httpOnly?: boolean;
+    /** 是否Secure */
+    secure?: boolean;
+    /** SameSite属性 */
+    sameSite?: 'Strict' | 'Lax' | 'None';
+  }
+
+  /** 账号数据（简化版，不存储Cookie） */
+  interface AccountData {
+    /** 账号信息 */
+    accountInfo: AccountInfo;
+    /** 登录方式 */
+    loginMethod: 'channels_helper' | 'shop_helper';
+    /** 登录时间戳 */
+    loginTime: number;
+    /** 更新时间 */
+    updatedAt: string;
+    /** 浏览器ID（必须，用于关联云端账号） */
+    browserId: string;
+    /** 最后同步时间（用于判断缓存是否过期） */
+    lastSyncTime?: number;
+  }
+
+  /** 云端Cookie状态缓存 */
+  interface CloudStatusCache {
+    /** Cookie状态 */
+    cookieStatus: 'pending' | 'online' | 'offline' | 'checking';
+    /** 最后检测时间 */
+    lastCheckTime: string | null;
+    /** 最后有效时间 */
+    lastValidTime: string | null;
+    /** Cookie获取时间 */
+    cookieUpdatedAt: string | null;
+    /** Cookie失效时间 */
+    cookieExpiredAt: string | null;
+    /** 连续检测失败次数 */
+    checkErrorCount: number;
+    /** 本地缓存时间 */
+    cachedAt: number;
+    /** 账号信息 */
+    accountInfo?: {
+      nickname: string;
+      avatar: string;
+      loginMethod: string;
+    } | null;
+  }
+
+  /** 账号信息 */
+  interface AccountInfo {
+    /** 昵称 */
+    nickname: string;
+    /** 头像URL */
+    avatar: string;
+    /** 微信ID（视频号助手） */
+    wechatId?: string;
+    /** 视频号用户名 */
+    finderUsername?: string;
+    /** 商家ID（小店带货助手） */
+    appuin?: string;
+  }
+
+  /** Cookie状态 */
+  type CookieStatus = 'pending' | 'online' | 'offline' | 'checking';
+
+  /** 账号映射表（browser_id -> AccountData） */
+  type AccountMap = Record<string, AccountData>;
+
+  /**
+   * @deprecated 使用 AccountData 代替
+   * 为了兼容性保留，但不再使用
+   */
+  interface CookieData extends AccountData {
+    cookies?: Cookie[];
+    expiresTime?: string;
+    renewalCount?: number;
+    expireTime?: number;
+    lastCheckTime?: number;
+  }
+
+  /**
+   * @deprecated 使用 AccountMap 代替
+   */
+  type CookieMap = Record<string, CookieData>;
+
+  /** Cookie检测结果 */
+  interface CookieCheckResult {
+    /** 是否有效 */
+    isValid: boolean;
+    /** 昵称 */
+    nickname?: string;
+    /** 消息 */
+    message: string;
+    /** 账号信息 */
+    accountInfo?: AccountInfo;
+  }
+
+  /** Cookie验证响应 */
+  interface VerifyCookieResponse {
+    success: boolean;
+    data: CookieCheckResult;
+    message: string;
+  }
+
+  /** 在线时长信息 */
+  interface OnlineDuration {
+    /** 总在线秒数 */
+    totalSeconds: number;
+    /** 格式化字符串 */
+    formatted: string;
+    /** 是否已掉线 */
+    isOffline: boolean;
+  }
+}
