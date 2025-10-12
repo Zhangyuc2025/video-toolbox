@@ -40,7 +40,10 @@ jobs:
           workspaces: './src-tauri -> target'
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Check Tauri CLI
+        run: pnpm tauri --version
 
       - name: Build and Release
         uses: tauri-apps/tauri-action@v0
