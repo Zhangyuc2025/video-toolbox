@@ -40,9 +40,9 @@ __pycache__/
 *$py.class
 *.so
 .Python
-build/
+# build/ - 注释掉，项目的 build 目录是 Vite 配置，需要提交
 develop-eggs/
-dist/
+# dist/ - 已在上面定义
 downloads/
 eggs/
 .eggs/
