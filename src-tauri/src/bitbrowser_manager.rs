@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 use sysinfo::System;
+use tauri::Manager;
 
 /// 可能的 BitBrowser 可执行文件名
 const POSSIBLE_EXE_NAMES: &[&str] = &[
@@ -594,10 +595,81 @@ async fn test_api_port(port: u16) -> bool {
     }
 }
 
-/// 自动检测比特浏览器 API 端口（智能检测，速度优化）
-/// 返回检测到的端口号，如果未检测到则返回 None
-pub async fn detect_api_port() -> Option<u16> {
-    println!("开始自动检测比特浏览器 API 端口...");
+/// 检查指定端口是否被占用，并返回占用该端口的进程 PID
+#[cfg(target_os = "windows")]
+fn find_process_using_port(port: u16) -> Option<u32> {
+    use std::process::Command;
+
+    // 使用 netstat 查找占用指定端口的进程
+    let output = Command::new("netstat")
+        .args(&["-ano"])
+        .output()
+        .ok()?;
+
+    let output_str = String::from_utf8_lossy(&output.stdout);
+
+    // 查找包含指定端口的行
+    for line in output_str.lines() {
+        if line.contains(&format!(":{}", port)) && line.contains("LISTENING") {
+            // 提取 PID（最后一列）
+            if let Some(pid_str) = line.split_whitespace().last() {
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    return Some(pid);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn find_process_using_port(port: u16) -> Option<u32> {
+    use std::process::Command;
+
+    // 使用 lsof 查找占用指定端口的进程
+    let output = Command::new("lsof")
+        .args(&["-i", &format!(":{}", port), "-t"])
+        .output()
+        .ok()?;
+
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    if let Some(first_line) = output_str.lines().next() {
+        if let Ok(pid) = first_line.trim().parse::<u32>() {
+            return Some(pid);
+        }
+    }
+
+    None
+}
+
+/// 强制关闭指定 PID 的进程
+fn kill_process_by_pid(pid: u32) -> Result<(), String> {
+    let mut system = System::new_all();
+    system.refresh_processes();
+
+    // 使用 sysinfo 的 PID 类型
+    let sys_pid = sysinfo::Pid::from_u32(pid);
+
+    if let Some(process) = system.process(sys_pid) {
+        if process.kill() {
+            println!("✓ 已强制关闭进程 PID: {}", pid);
+            Ok(())
+        } else {
+            Err(format!("无法关闭进程 PID: {}", pid))
+        }
+    } else {
+        Err(format!("未找到进程 PID: {}", pid))
+    }
+}
+
+/// 简化的端口检测逻辑：
+/// 1. 只检测默认端口 54345
+/// 2. 如果端口连接失败，检查是否被其他进程占用
+/// 3. 如果被占用，弹出对话框询问是否强制关闭
+/// 4. 返回检测到的端口号，如果未检测到则返回 None
+pub async fn detect_api_port(app_handle: Option<&tauri::AppHandle>) -> Option<u16> {
+    println!("开始检测比特浏览器 API 端口 54345...");
 
     // 首先检查比特浏览器是否在运行
     if !is_bitbrowser_running() {
@@ -605,40 +677,90 @@ pub async fn detect_api_port() -> Option<u16> {
         return None;
     }
 
-    // 优化策略：优先快速测试默认端口 54345（90%+ 的情况）
-    println!("  快速检测默认端口 54345...");
-    if test_api_port(54345).await {
-        println!("✓ 找到可用的 API 端口: 54345 (默认端口)");
-        return Some(54345);
+    // 测试默认端口 54345
+    println!("  检测端口 54345...");
+    if test_api_port(DEFAULT_API_PORT).await {
+        println!("✓ 端口 54345 可用");
+        return Some(DEFAULT_API_PORT);
     }
 
-    // 如果默认端口不可用，使用并行扫描其他端口（罕见情况的兜底）
-    println!("  默认端口不可用，开始并行扫描其他端口...");
-    let alternative_ports: &[u16] = &[54346, 35000, 15000, 9200, 9876, 5000, 3000];
+    // 端口连接失败，检查是否被占用
+    println!("⚠ 端口 54345 连接失败，检查是否被其他进程占用...");
 
-    let mut tasks = Vec::new();
-    for &port in alternative_ports {
-        tasks.push(tokio::spawn(async move {
-            if test_api_port(port).await {
-                Some(port)
-            } else {
-                None
+    if let Some(pid) = find_process_using_port(DEFAULT_API_PORT) {
+        println!("  发现进程 PID {} 占用端口 54345", pid);
+
+        // 检查占用端口的进程是否是比特浏览器自己
+        let mut system = System::new_all();
+        system.refresh_processes();
+        let sys_pid = sysinfo::Pid::from_u32(pid);
+
+        if let Some(process) = system.process(sys_pid) {
+            let process_name = process.name().to_string();
+            println!("  占用端口的进程名: {}", process_name);
+
+            // 如果是比特浏览器进程，说明比特浏览器在运行但 API 没有响应
+            if is_bitbrowser_process(&process_name) {
+                println!("⚠ 比特浏览器进程占用端口但 API 无响应，可能需要重启");
+                return None;
             }
-        }));
-    }
 
-    // 等待第一个成功的结果
-    while !tasks.is_empty() {
-        let (result, _index, remaining) = futures::future::select_all(tasks).await;
-        tasks = remaining;
+            // 如果是其他进程占用，弹出对话框询问是否关闭
+            println!("⚠ 端口被非比特浏览器进程占用: {}", process_name);
 
-        if let Ok(Some(port)) = result {
-            println!("✓ 找到可用的 API 端口: {} (非标准端口)", port);
-            return Some(port);
+            // 如果有 app_handle，显示对话框
+            let user_confirmed = if let Some(handle) = app_handle {
+                use tauri::api::dialog::blocking::ask;
+
+                let message = format!(
+                    "端口 54345 被进程 \"{}\" (PID: {}) 占用。\n\n是否强制关闭该进程以释放端口？",
+                    process_name, pid
+                );
+
+                let confirmed = ask(
+                    Some(&handle.get_window("main").unwrap()),
+                    "端口被占用",
+                    message,
+                );
+
+                println!("  用户选择: {}", if confirmed { "确认关闭" } else { "取消" });
+                confirmed
+            } else {
+                // 没有 app_handle 时，自动确认（用于后台任务）
+                println!("  后台任务自动确认关闭进程");
+                true
+            };
+
+            if !user_confirmed {
+                println!("  用户取消关闭进程");
+                return None;
+            }
+
+            // 用户确认后，关闭进程
+            println!("  正在关闭占用端口的进程...");
+            if let Err(e) = kill_process_by_pid(pid) {
+                println!("✗ 关闭进程失败: {}", e);
+                return None;
+            }
+
+            // 等待进程关闭
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            // 再次测试端口
+            println!("  重新检测端口 54345...");
+            if test_api_port(DEFAULT_API_PORT).await {
+                println!("✓ 端口 54345 现在可用");
+                return Some(DEFAULT_API_PORT);
+            } else {
+                println!("✗ 端口仍然不可用");
+                return None;
+            }
         }
+    } else {
+        println!("  端口 54345 未被占用，但无法连接到 API");
     }
 
-    println!("✗ 未找到可用的 API 端口");
+    println!("✗ 无法检测到可用的 API 端口");
     None
 }
 
@@ -652,7 +774,7 @@ pub async fn get_api_base_url() -> Result<String, String> {
 
     // 2. 如果没有缓存，自动检测并保存
     println!("未找到缓存的端口配置，开始自动检测...");
-    if let Some(port) = detect_api_port().await {
+    if let Some(port) = detect_api_port(None).await {
         write_cached_api_port(port);
         Ok(format!("http://127.0.0.1:{}", port))
     } else {
@@ -675,7 +797,7 @@ pub async fn validate_and_update_api_port() -> Result<String, String> {
     }
 
     // 重新检测端口
-    if let Some(port) = detect_api_port().await {
+    if let Some(port) = detect_api_port(None).await {
         write_cached_api_port(port);
         Ok(format!("http://127.0.0.1:{}", port))
     } else {

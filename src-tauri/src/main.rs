@@ -282,9 +282,9 @@ async fn status_monitor_task(app_handle: AppHandle, monitor_running: Arc<AtomicB
                         println!("BitBrowser 启动命令已发送，等待服务启动...");
                         sleep(Duration::from_secs(5)).await;
 
-                        // 尝试检测端口
+                        // 尝试检测端口（后台任务，无需用户确认）
                         println!("检测 API 端口...");
-                        if let Some(port) = bitbrowser_manager::detect_api_port().await {
+                        if let Some(port) = bitbrowser_manager::detect_api_port(None).await {
                             println!("✓ 检测到端口: {}, 已保存", port);
                         }
                         continue; // 跳过本次等待，立即检测
@@ -292,7 +292,7 @@ async fn status_monitor_task(app_handle: AppHandle, monitor_running: Arc<AtomicB
                 } else {
                     // 进程运行中但连接失败，可能是端口变了
                     println!("BitBrowser 进程运行中但 API 连接失败，重新检测端口...");
-                    if let Some(port) = bitbrowser_manager::detect_api_port().await {
+                    if let Some(port) = bitbrowser_manager::detect_api_port(None).await {
                         println!("✓ 检测到新端口: {}, 已更新配置", port);
                         consecutive_failures = 0; // 重置失败计数
                     } else {
@@ -420,7 +420,7 @@ async fn launch_bitbrowser(path: Option<String>) -> Result<ApiResponse, String> 
             // 3. 自动检测并保存 API 端口
             println!("开始检测 BitBrowser API 端口...");
             for attempt in 1..=10 {
-                if let Some(port) = bitbrowser_manager::detect_api_port().await {
+                if let Some(port) = bitbrowser_manager::detect_api_port(None).await {
                     println!("✓ 检测到 API 端口: {}, 已保存到配置", port);
                     return Ok(ApiResponse {
                         success: true,

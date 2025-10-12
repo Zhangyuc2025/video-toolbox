@@ -1,7 +1,7 @@
 [package]
 name = "video-toolbox-tauri"
-version = "1.0.0"
-description = "视频号工具箱"
+version = "1.0.1"
+description = "瑙嗛鍙峰伐鍏风"
 authors = ["you"]
 license = ""
 repository = ""
@@ -31,3 +31,8 @@ winreg = "0.52"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+
+
+
+
+
