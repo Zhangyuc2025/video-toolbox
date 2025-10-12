@@ -33,30 +33,46 @@ export async function checkForUpdates(): Promise<UpdateInfo> {
   }
 
   try {
+    console.log('[更新检查] 开始检查更新...');
+    const currentVer = await getCurrentVersion();
+    console.log('[更新检查] 当前版本:', currentVer);
+
     const { checkUpdate } = await import('@tauri-apps/api/updater');
+    console.log('[更新检查] 调用 Tauri checkUpdate API...');
+
     const { shouldUpdate, manifest } = await checkUpdate();
+    console.log('[更新检查] shouldUpdate:', shouldUpdate);
+    console.log('[更新检查] manifest:', manifest);
 
     if (!shouldUpdate || !manifest) {
+      console.log('[更新检查] 无可用更新');
       return {
         available: false,
-        currentVersion: await getCurrentVersion()
+        currentVersion: currentVer
       };
     }
 
+    console.log('[更新检查] 发现新版本:', manifest.version);
     return {
       available: true,
-      currentVersion: await getCurrentVersion(),
+      currentVersion: currentVer,
       latestVersion: manifest.version,
       releaseNotes: manifest.body || '无更新说明',
       releaseDate: manifest.date
     };
   } catch (error: any) {
-    console.error('检查更新失败:', error);
+    console.error('[更新检查] 检查更新失败:', error);
+    console.error('[更新检查] 错误详情:', {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
+
     // 如果是网络错误或服务器错误，给出更友好的提示
     if (error.message?.includes('fetch') || error.message?.includes('network')) {
       throw new Error('网络连接失败，请检查网络后重试');
     }
-    throw new Error('无法检查更新，请稍后重试');
+    throw new Error(`无法检查更新: ${error.message || '未知错误'}`);
   }
 }
 
