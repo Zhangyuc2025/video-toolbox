@@ -848,12 +848,3 @@ fn write_cached_api_port(port: u16) {
     }
 }
 
-/// 清除 API 端口缓存
-fn clear_cached_api_port() {
-    if let Some(cache_path) = get_api_port_cache_path() {
-        if cache_path.exists() {
-            let _ = fs::remove_file(&cache_path);
-            println!("✓ API 端口缓存已清除");
-        }
-    }
-}
