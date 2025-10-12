@@ -782,29 +782,6 @@ pub async fn get_api_base_url() -> Result<String, String> {
     }
 }
 
-/// 验证当前缓存的端口是否有效，无效则重新检测
-pub async fn validate_and_update_api_port() -> Result<String, String> {
-    // 读取缓存的端口
-    if let Some(port) = read_cached_api_port() {
-        // 验证端口是否有效
-        if test_api_port(port).await {
-            println!("✓ 端口 {} 验证有效", port);
-            return Ok(format!("http://127.0.0.1:{}", port));
-        } else {
-            println!("⚠ 缓存的端口 {} 已失效，重新检测...", port);
-            clear_cached_api_port();
-        }
-    }
-
-    // 重新检测端口
-    if let Some(port) = detect_api_port(None).await {
-        write_cached_api_port(port);
-        Ok(format!("http://127.0.0.1:{}", port))
-    } else {
-        Err("无法检测到比特浏览器 API 端口".to_string())
-    }
-}
-
 // ==================== API 端口缓存管理 ====================
 
 /// 获取 API 端口缓存文件路径
