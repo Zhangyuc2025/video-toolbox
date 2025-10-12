@@ -64,6 +64,8 @@ pub struct AppConfig {
     pub member_mode: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_persistence_mode: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitbrowser_vip_mode: Option<bool>,
 
     // 账号信息（browser_id -> AccountData）
     #[serde(default)]
@@ -141,6 +143,7 @@ impl ConfigManager {
             "filter_my_accounts" => config.filter_my_accounts,
             "member_mode" => config.member_mode,
             "test_persistence_mode" => config.test_persistence_mode,
+            "bitbrowser_vip_mode" => config.bitbrowser_vip_mode,
             _ => None,
         }
     }
@@ -151,6 +154,7 @@ impl ConfigManager {
             "filter_my_accounts" => config.filter_my_accounts = Some(value),
             "member_mode" => config.member_mode = Some(value),
             "test_persistence_mode" => config.test_persistence_mode = Some(value),
+            "bitbrowser_vip_mode" => config.bitbrowser_vip_mode = Some(value),
             _ => return Err(format!("未知的配置项: {}", key)),
         }
         drop(config);
