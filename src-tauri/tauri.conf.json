@@ -34,7 +34,7 @@
                                                     "https://github.com/Zhangyuc2025/video-toolbox/releases/latest/download/latest.json"
                                                 ],
                                   "dialog":  false,
-                                  "pubkey":  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlBNkVFODQwM0MwQkUyRTIKUldUaTRnczhRT2h1bWt5ZklqS0VKRW0xRkt4MkJ6R25wRVI2NEhhYjVvamlCdXlWYkVUUUJvUS8K"
+                                  "pubkey":  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc3MDNBOTQ4MzMxMTVDMzMKUldRelhCRXpTS2tEZCsvNHpiQ1diV0U5YmZVcndsaGFBMXZTODQ5R0hZZTA3NFNwaG5UQzVRZ3gK"
                               },
                   "bundle":  {
                                  "active":  true,
@@ -69,3 +69,4 @@
                               ]
               }
 }
+
