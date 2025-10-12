@@ -8,7 +8,7 @@
               },
     "package":  {
                     "productName":  "视频号工具箱",
-                    "version":  "1.0.3"
+                    "version":  "1.0.4"
                 },
     "tauri":  {
                   "allowlist":  {
@@ -31,7 +31,7 @@
                   "updater":  {
                                   "active":  true,
                                   "endpoints":  [
-                                                    "https://github.com/Zhangyuc2025/video-toolbox/releases/latest/download/latest.json"
+                                                    "https://permanent-link-service.zhangyuc2020.workers.dev/api/updater/latest.json"
                                                 ],
                                   "dialog":  false,
                                   "pubkey":  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc3MDNBOTQ4MzMxMTVDMzMKUldRelhCRXpTS2tEZCsvNHpiQ1diV0U5YmZVcndsaGFBMXZTODQ5R0hZZTA3NFNwaG5UQzVRZ3gK"
