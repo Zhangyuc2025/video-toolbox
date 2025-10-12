@@ -34,48 +34,15 @@ export async function checkForUpdates(): Promise<UpdateInfo> {
 
   try {
     const { checkUpdate } = await import('@tauri-apps/api/updater');
-    const { getVersion } = await import('@tauri-apps/api/app');
-
-    const currentVer = await getVersion();
-    console.log('[Updater] ========== 开始更新检查 ==========');
-    console.log('[Updater] 当前版本:', currentVer);
-
-    const expectedUrl = `https://permanent-link-service.zhangyuc2020.workers.dev/api/updater/check/windows-x86_64/${currentVer}`;
-    console.log('[Updater] 预期请求 URL:', expectedUrl);
-
-    // 手动测试 API
-    try {
-      console.log('[Updater] 手动测试 API...');
-      const testResponse = await fetch(expectedUrl);
-      console.log('[Updater] API 状态码:', testResponse.status);
-      if (testResponse.status === 200) {
-        const apiData = await testResponse.json();
-        console.log('[Updater] API 返回数据:', apiData);
-      } else {
-        console.log('[Updater] API 返回 204 或其他状态码，表示无更新');
-      }
-    } catch (fetchError) {
-      console.error('[Updater] 手动 API 测试失败:', fetchError);
-    }
-
-    console.log('[Updater] 调用 Tauri checkUpdate...');
-    const result = await checkUpdate();
-    console.log('[Updater] Tauri checkUpdate 返回:', JSON.stringify(result, null, 2));
-
-    const { shouldUpdate, manifest } = result;
-    console.log('[Updater] shouldUpdate:', shouldUpdate);
-    console.log('[Updater] manifest:', manifest);
-    console.log('[Updater] ========== 更新检查结束 ==========');
+    const { shouldUpdate, manifest } = await checkUpdate();
 
     if (!shouldUpdate || !manifest) {
-      console.log('[Updater] 无需更新 - shouldUpdate:', shouldUpdate, 'manifest:', !!manifest);
       return {
         available: false,
         currentVersion: await getCurrentVersion()
       };
     }
 
-    console.log('[Updater] 发现新版本:', manifest.version);
     return {
       available: true,
       currentVersion: await getCurrentVersion(),
@@ -85,7 +52,6 @@ export async function checkForUpdates(): Promise<UpdateInfo> {
     };
   } catch (error: any) {
     console.error('检查更新失败:', error);
-    console.error('错误详情:', error.message, error.stack);
     // 如果是网络错误或服务器错误，给出更友好的提示
     if (error.message?.includes('fetch') || error.message?.includes('network')) {
       throw new Error('网络连接失败，请检查网络后重试');
