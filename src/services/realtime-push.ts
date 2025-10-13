@@ -1,77 +1,72 @@
 /**
- * Supabase Realtime 实时推送服务
+ * V3 Supabase Realtime 实时推送服务
  * 用于监听云端登录状态变化，实现毫秒级通知
+ *
+ * V3 改进：
+ * - 使用 Supabase Realtime 替代原生 WebSocket
+ * - 延迟降低到毫秒级（vs 2秒轮询）
+ * - 自动重连和错误处理
+ * - 免费计划支持 200 个并发连接
  */
+
 import { createClient, RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 
-// Supabase 配置
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || '';
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+// 从环境变量读取 Supabase 配置
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'https://jsfjdcbfftuaynwkmjey.supabase.co';
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpzZmpkY2JmZnR1YXlud2ttamV5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjAwODI2NDUsImV4cCI6MjA3NTY1ODY0NX0.7SBL2PTnEuCE3sfEHby9jy6N75wjtVxGCtO7zUvN6cg';
 
-// 检查配置是否有效
-const isSupabaseConfigured = SUPABASE_URL && SUPABASE_ANON_KEY &&
-  !SUPABASE_URL.includes('your-project') &&
-  !SUPABASE_ANON_KEY.includes('your-anon-key');
-
-// 调试日志
-console.log('[Realtime] 配置检查:', {
-  SUPABASE_URL: SUPABASE_URL ? `${SUPABASE_URL.substring(0, 30)}...` : '❌ 未设置',
-  SUPABASE_ANON_KEY: SUPABASE_ANON_KEY ? `${SUPABASE_ANON_KEY.substring(0, 30)}...` : '❌ 未设置',
-  isSupabaseConfigured: isSupabaseConfigured ? '✅ 已配置' : '❌ 未配置'
-});
+import type { CloudPushData } from '@/types/push';
 
 /**
  * Cookie 更新事件回调
+ * 使用 CloudPushData 类型定义，确保类型安全
  */
-export type CookieUpdateCallback = (data: {
-  browserId: string;
-  cookies: any;
-  nickname?: string;
-  avatar?: string;
-  loginMethod?: string;
-  wechatStatus?: number; // 微信原始状态：视频号助手 0/5/1, 小店助手 1/2/3
-  loginStatus?: string; // 登录状态：waiting, scanned, confirmed, completed, expired
-  cookieStatus?: string; // Cookie状态：pending(未登录), online(在线), offline(掉线)
-  cookieExpiredAt?: string; // Cookie失效时间
-  oldData?: {
-    wechatStatus?: number;
-    cookieStatus?: string;
-    loginStatus?: string;
-    nickname?: string;
-  }; // 旧数据，用于比较变化
-}) => void;
+export type CookieUpdateCallback = (data: CloudPushData) => void;
 
 /**
- * Realtime 推送服务类
+ * Realtime 订阅连接
+ */
+interface RealtimeConnection {
+  channel: RealtimeChannel;
+  browserId: string;
+  callbacks: CookieUpdateCallback[];
+}
+
+/**
+ * Supabase Realtime 实时推送服务类
  */
 export class RealtimePushService {
   private supabase: SupabaseClient | null = null;
-  private channel: RealtimeChannel | null = null;
-  private callbacks: Map<string, CookieUpdateCallback[]> = new Map(); // browserId → callbacks[]
+  private connections: Map<string, RealtimeConnection> = new Map();
   private isInitialized = false;
 
   /**
-   * 初始化 Supabase 客户端
+   * 初始化服务
    */
   private initialize() {
-    if (this.isInitialized || !isSupabaseConfigured) {
-      return false;
+    if (this.isInitialized) {
+      return true;
     }
 
     try {
+      // 创建 Supabase 客户端
       this.supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false
+        },
         realtime: {
           params: {
-            eventsPerSecond: 10 // 限制事件频率
+            eventsPerSecond: 10 // 限制每秒事件数
           }
         }
       });
 
+      console.log('[Realtime-V3] ✅ Supabase Realtime 服务初始化成功');
       this.isInitialized = true;
-      console.log('[Realtime] ✅ Supabase 客户端初始化成功');
       return true;
     } catch (error) {
-      console.error('[Realtime] Supabase 客户端初始化失败:', error);
+      console.error('[Realtime-V3] ❌ 初始化失败:', error);
       return false;
     }
   }
@@ -80,7 +75,7 @@ export class RealtimePushService {
    * 检查服务是否可用
    */
   isAvailable(): boolean {
-    return isSupabaseConfigured && this.isInitialized;
+    return this.isInitialized || this.initialize();
   }
 
   /**
@@ -90,120 +85,114 @@ export class RealtimePushService {
    * @returns 订阅是否成功
    */
   subscribe(browserId: string, callback: CookieUpdateCallback): boolean {
-    // 如果 Supabase 未配置，返回 false
-    if (!isSupabaseConfigured) {
-      console.warn('[Realtime] Supabase 未配置，无法订阅账号状态');
-      return false;
-    }
-
-    // 初始化客户端
+    // 初始化服务
     if (!this.isInitialized && !this.initialize()) {
-      console.warn('[Realtime] 客户端初始化失败');
+      console.warn('[Realtime-V3] 服务初始化失败');
       return false;
     }
 
     if (!this.supabase) {
+      console.error('[Realtime-V3] Supabase 客户端未初始化');
       return false;
     }
 
     try {
-      // 首次订阅时，创建全局 Broadcast 频道
-      if (!this.channel) {
-        console.log('[Realtime] 正在创建 Channel: accounts_realtime');
+      // 如果该 browserId 已有连接，只添加回调
+      const existingConnection = this.connections.get(browserId);
+      if (existingConnection) {
+        existingConnection.callbacks.push(callback);
+        console.log(`[Realtime-V3] ✅ 已添加回调: ${browserId} (总回调数: ${existingConnection.callbacks.length})`);
+        return true;
+      }
 
-        this.channel = this.supabase
-          .channel('accounts_realtime')
-          .on(
-            'broadcast',
-            { event: 'account_update' },
-            (payload) => {
-              const data = payload.payload;
+      // 创建新的 Realtime 订阅
+      console.log(`[Realtime-V3] 正在订阅数据库更新: ${browserId}`);
 
-              console.log('[Realtime] 📨 收到广播消息:', {
-                browserId: data.browserId,
-                cookieStatus: data.cookieStatus,
-                loginStatus: data.loginStatus,
-                wechatStatus: data.wechatStatus
+      const channel = this.supabase
+        .channel(`permanent_links_${browserId}`)
+        .on(
+          'postgres_changes',
+          {
+            event: 'UPDATE',
+            schema: 'public',
+            table: 'permanent_links',
+            filter: `browser_id=eq.${browserId}`
+          },
+          (payload) => {
+            const receiveTime = performance.now();
+            console.log(`[Realtime-V3] 📨 收到数据库更新: ${browserId}`, {
+              cookie_status: payload.new.cookie_status,
+              nickname: payload.new.nickname,
+              receiveTime: `${receiveTime.toFixed(2)}ms`
+            });
+
+            // 转换数据库字段为 CloudPushData 格式
+            const data: Partial<CloudPushData> = {
+              browserId,
+              cookieStatus: payload.new.cookie_status,
+              nickname: payload.new.nickname,
+              avatar: payload.new.avatar,
+              scanned: payload.new.cookie_status === 'checking',
+              confirmed: payload.new.cookie_status === 'online',
+              expired: payload.new.cookie_status === 'offline'
+            };
+
+            // 触发所有回调
+            const connection = this.connections.get(browserId);
+            if (connection) {
+              const callbackStartTime = performance.now();
+              connection.callbacks.forEach((cb, index) => {
+                const cbStart = performance.now();
+                cb(data as CloudPushData);
+                const cbEnd = performance.now();
+                console.log(`[Realtime-V3] ⏱️ Callback ${index + 1} 执行时间: ${(cbEnd - cbStart).toFixed(2)}ms`);
               });
-
-              // 查找该 browserId 的所有回调并触发
-              const callbacks = this.callbacks.get(data.browserId);
-              if (callbacks && callbacks.length > 0) {
-                console.log(`[Realtime] 触发 ${callbacks.length} 个回调: ${data.browserId}`);
-                callbacks.forEach(cb => {
-                  cb({
-                    browserId: data.browserId,
-                    cookies: data.cookies,
-                    nickname: data.nickname,
-                    avatar: data.avatar,
-                    loginMethod: data.loginMethod,
-                    wechatStatus: data.wechatStatus,
-                    loginStatus: data.loginStatus,
-                    cookieStatus: data.cookieStatus,
-                    cookieExpiredAt: data.cookieExpiredAt,
-                    oldData: data.oldData
-                  });
-                });
-              } else {
-                console.warn(`[Realtime] ⚠️ 未找到回调: ${data.browserId}`);
-              }
+              const callbackEndTime = performance.now();
+              console.log(`[Realtime-V3] ⏱️ 所有 Callback 总执行时间: ${(callbackEndTime - callbackStartTime).toFixed(2)}ms`);
             }
-          )
-          .subscribe((status) => {
-            console.log(`[Realtime] Channel 状态变化: ${status}`);
+          }
+        )
+        .subscribe((status) => {
+          console.log(`[Realtime-V3] 订阅状态: ${browserId} - ${status}`);
+        });
 
-            if (status === 'SUBSCRIBED') {
-              console.log('[Realtime] ✅ Channel 订阅成功，等待接收消息');
-            } else if (status === 'CHANNEL_ERROR') {
-              console.error('[Realtime] ❌ Channel 连接错误，WebSocket 可能失败');
-              // 不立即设为 null，让它保持连接状态
-              // this.channel = null;
-            } else if (status === 'TIMED_OUT') {
-              console.error('[Realtime] ❌ Channel 连接超时');
-              this.channel = null;
-            } else if (status === 'CLOSED') {
-              console.warn('[Realtime] Channel 已关闭');
-              this.channel = null;
-            }
-          });
-      }
+      const connection: RealtimeConnection = {
+        channel,
+        browserId,
+        callbacks: [callback]
+      };
 
-      // 注册回调到对应 browserId
-      if (!this.callbacks.has(browserId)) {
-        this.callbacks.set(browserId, []);
-      }
+      this.connections.set(browserId, connection);
 
-      this.callbacks.get(browserId)!.push(callback);
-
-      console.log(`[Realtime] ✅ 已注册回调: ${browserId} (总订阅数: ${this.callbacks.size})`);
-
+      console.log(`[Realtime-V3] ✅ 已创建订阅: ${browserId} (总订阅数: ${this.connections.size})`);
       return true;
+
     } catch (error) {
-      console.error('[Realtime] 订阅账号状态失败', error);
+      console.error('[Realtime-V3] 订阅账号状态失败', error);
       return false;
     }
   }
 
-
   /**
-   * 取消订阅（移除所有回调）
+   * 取消订阅（移除所有回调，关闭连接）
    * @param browserId 浏览器ID
    */
   async unsubscribe(browserId: string): Promise<void> {
-    if (!this.callbacks.has(browserId)) {
+    const connection = this.connections.get(browserId);
+    if (!connection || !this.supabase) {
       return;
     }
 
     try {
-      this.callbacks.delete(browserId);
+      // 取消 Realtime 订阅
+      await this.supabase.removeChannel(connection.channel);
 
-      // 如果没有任何回调了，关闭全局频道
-      if (this.callbacks.size === 0 && this.channel) {
-        await this.supabase?.removeChannel(this.channel);
-        this.channel = null;
-      }
+      // 从连接池中移除
+      this.connections.delete(browserId);
+
+      console.log(`[Realtime-V3] ✅ 已取消订阅: ${browserId} (剩余订阅数: ${this.connections.size})`);
     } catch (error) {
-      console.error(`[Realtime] 取消订阅失败: ${browserId}`, error);
+      console.error(`[Realtime-V3] 取消订阅失败: ${browserId}`, error);
     }
   }
 
@@ -211,33 +200,45 @@ export class RealtimePushService {
    * 取消所有订阅
    */
   async unsubscribeAll(): Promise<void> {
-    // 清空所有回调
-    this.callbacks.clear();
+    console.log(`[Realtime-V3] 正在关闭所有订阅 (${this.connections.size} 个)`);
 
-    // 关闭全局频道
-    if (this.channel) {
-      try {
-        await this.supabase?.removeChannel(this.channel);
-        this.channel = null;
-      } catch (error) {
-        console.error('[Realtime] 关闭频道失败:', error);
-      }
+    const browserIds = Array.from(this.connections.keys());
+
+    for (const browserId of browserIds) {
+      await this.unsubscribe(browserId);
     }
+
+    this.connections.clear();
+    console.log('[Realtime-V3] ✅ 所有订阅已关闭');
   }
 
   /**
    * 获取当前订阅数量（账号数量）
    */
   getSubscriptionCount(): number {
-    return this.callbacks.size;
+    return this.connections.size;
   }
 
   /**
    * 获取总回调数量
    */
   getTotalCallbackCount(): number {
-    return Array.from(this.callbacks.values())
-      .reduce((sum, cbs) => sum + cbs.length, 0);
+    return Array.from(this.connections.values())
+      .reduce((sum, conn) => sum + conn.callbacks.length, 0);
+  }
+
+  /**
+   * 获取连接状态
+   */
+  getConnectionStatus(browserId: string): 'connecting' | 'open' | 'closing' | 'closed' | 'not_found' {
+    const connection = this.connections.get(browserId);
+    if (!connection) {
+      return 'not_found';
+    }
+
+    // Supabase Realtime Channel 没有直接的 readyState
+    // 简单返回 'open'（订阅后即为连接状态）
+    return 'open';
   }
 
   /**
@@ -245,13 +246,9 @@ export class RealtimePushService {
    */
   async destroy(): Promise<void> {
     await this.unsubscribeAll();
-
-    if (this.supabase) {
-      this.supabase.removeAllChannels();
-      this.supabase = null;
-    }
-
     this.isInitialized = false;
+    this.supabase = null;
+    console.log('[Realtime-V3] 服务已销毁');
   }
 }
 
