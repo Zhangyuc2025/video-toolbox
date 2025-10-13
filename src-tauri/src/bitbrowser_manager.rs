@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 use sysinfo::System;
-use tauri::Manager;
 
 /// 可能的 BitBrowser 可执行文件名
 const POSSIBLE_EXE_NAMES: &[&str] = &[
@@ -51,7 +50,7 @@ fn find_exe_in_directory(dir: &PathBuf) -> Option<String> {
 }
 
 /// 检查进程名是否匹配 BitBrowser
-fn is_bitbrowser_process(name: &str) -> bool {
+pub fn is_bitbrowser_process(name: &str) -> bool {
     let name_lower = name.to_lowercase();
     name_lower.contains("bitbrowser")
         || name_lower.contains("bit browser")
@@ -539,65 +538,10 @@ pub fn kill_bitbrowser() -> Result<(), String> {
 /// 官方文档确认的默认端口是 54345
 const DEFAULT_API_PORT: u16 = 54345;
 
-/// 检测指定端口是否是比特浏览器 API
-/// 验证策略：
-/// 1. 响应状态码为 200
-/// 2. 响应体为 JSON 格式
-/// 3. 包含比特浏览器 API 特有的字段结构：success + data.list
-async fn test_api_port(port: u16) -> bool {
-    let url = format!("http://127.0.0.1:{}/browser/list", port);
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .unwrap();
-
-    match client
-        .post(&url)
-        .json(&serde_json::json!({"page": 0, "pageSize": 1}))
-        .send()
-        .await
-    {
-        Ok(response) => {
-            // 1. 检查 HTTP 状态码
-            if !response.status().is_success() {
-                return false;
-            }
-
-            // 2. 尝试解析 JSON
-            if let Ok(json) = response.json::<serde_json::Value>().await {
-                // 3. 验证比特浏览器 API 特有的响应结构
-                // 比特浏览器的 /browser/list 响应格式：
-                // {
-                //   "success": true,
-                //   "data": {
-                //     "list": [...],
-                //     "total": 10
-                //   }
-                // }
-
-                // 检查是否有 success 字段
-                let has_success = json.get("success").is_some();
-
-                // 检查是否有 data.list 结构（比特浏览器特征）
-                let has_data_list = json
-                    .get("data")
-                    .and_then(|data| data.get("list"))
-                    .is_some();
-
-                // 只有同时满足这两个条件才认为是比特浏览器 API
-                return has_success && has_data_list;
-            }
-
-            false
-        }
-        Err(_) => false,
-    }
-}
 
 /// 检查指定端口是否被占用，并返回占用该端口的进程 PID
 #[cfg(target_os = "windows")]
-fn find_process_using_port(port: u16) -> Option<u32> {
+pub fn find_process_using_port(port: u16) -> Option<u32> {
     use std::process::Command;
 
     // 使用 netstat 查找占用指定端口的进程
@@ -624,7 +568,7 @@ fn find_process_using_port(port: u16) -> Option<u32> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn find_process_using_port(port: u16) -> Option<u32> {
+pub fn find_process_using_port(port: u16) -> Option<u32> {
     use std::process::Command;
 
     // 使用 lsof 查找占用指定端口的进程
@@ -643,185 +587,11 @@ fn find_process_using_port(port: u16) -> Option<u32> {
     None
 }
 
-/// 强制关闭指定 PID 的进程
-fn kill_process_by_pid(pid: u32) -> Result<(), String> {
-    let mut system = System::new_all();
-    system.refresh_processes();
 
-    // 使用 sysinfo 的 PID 类型
-    let sys_pid = sysinfo::Pid::from_u32(pid);
-
-    if let Some(process) = system.process(sys_pid) {
-        if process.kill() {
-            println!("✓ 已强制关闭进程 PID: {}", pid);
-            Ok(())
-        } else {
-            Err(format!("无法关闭进程 PID: {}", pid))
-        }
-    } else {
-        Err(format!("未找到进程 PID: {}", pid))
-    }
-}
-
-/// 简化的端口检测逻辑：
-/// 1. 只检测默认端口 54345
-/// 2. 如果端口连接失败，检查是否被其他进程占用
-/// 3. 如果被占用，弹出对话框询问是否强制关闭
-/// 4. 返回检测到的端口号，如果未检测到则返回 None
-pub async fn detect_api_port(app_handle: Option<&tauri::AppHandle>) -> Option<u16> {
-    println!("开始检测比特浏览器 API 端口 54345...");
-
-    // 首先检查比特浏览器是否在运行
-    if !is_bitbrowser_running() {
-        println!("⚠ 比特浏览器未运行，无法检测端口");
-        return None;
-    }
-
-    // 测试默认端口 54345
-    println!("  检测端口 54345...");
-    if test_api_port(DEFAULT_API_PORT).await {
-        println!("✓ 端口 54345 可用");
-        return Some(DEFAULT_API_PORT);
-    }
-
-    // 端口连接失败，检查是否被占用
-    println!("⚠ 端口 54345 连接失败，检查是否被其他进程占用...");
-
-    if let Some(pid) = find_process_using_port(DEFAULT_API_PORT) {
-        println!("  发现进程 PID {} 占用端口 54345", pid);
-
-        // 检查占用端口的进程是否是比特浏览器自己
-        let mut system = System::new_all();
-        system.refresh_processes();
-        let sys_pid = sysinfo::Pid::from_u32(pid);
-
-        if let Some(process) = system.process(sys_pid) {
-            let process_name = process.name().to_string();
-            println!("  占用端口的进程名: {}", process_name);
-
-            // 如果是比特浏览器进程，说明比特浏览器在运行但 API 没有响应
-            if is_bitbrowser_process(&process_name) {
-                println!("⚠ 比特浏览器进程占用端口但 API 无响应，可能需要重启");
-                return None;
-            }
-
-            // 如果是其他进程占用，弹出对话框询问是否关闭
-            println!("⚠ 端口被非比特浏览器进程占用: {}", process_name);
-
-            // 如果有 app_handle，显示对话框
-            let user_confirmed = if let Some(handle) = app_handle {
-                use tauri::api::dialog::blocking::ask;
-
-                let message = format!(
-                    "端口 54345 被进程 \"{}\" (PID: {}) 占用。\n\n是否强制关闭该进程以释放端口？",
-                    process_name, pid
-                );
-
-                let confirmed = ask(
-                    Some(&handle.get_window("main").unwrap()),
-                    "端口被占用",
-                    message,
-                );
-
-                println!("  用户选择: {}", if confirmed { "确认关闭" } else { "取消" });
-                confirmed
-            } else {
-                // 没有 app_handle 时，自动确认（用于后台任务）
-                println!("  后台任务自动确认关闭进程");
-                true
-            };
-
-            if !user_confirmed {
-                println!("  用户取消关闭进程");
-                return None;
-            }
-
-            // 用户确认后，关闭进程
-            println!("  正在关闭占用端口的进程...");
-            if let Err(e) = kill_process_by_pid(pid) {
-                println!("✗ 关闭进程失败: {}", e);
-                return None;
-            }
-
-            // 等待进程关闭
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-            // 再次测试端口
-            println!("  重新检测端口 54345...");
-            if test_api_port(DEFAULT_API_PORT).await {
-                println!("✓ 端口 54345 现在可用");
-                return Some(DEFAULT_API_PORT);
-            } else {
-                println!("✗ 端口仍然不可用");
-                return None;
-            }
-        }
-    } else {
-        println!("  端口 54345 未被占用，但无法连接到 API");
-    }
-
-    println!("✗ 无法检测到可用的 API 端口");
-    None
-}
 
 /// 获取比特浏览器 API 基础 URL
-/// 优先使用配置文件中保存的端口，失效时才重新检测
+/// 比特浏览器的 API 端口固定为 54345，直接返回即可（参考官方 demo）
 pub async fn get_api_base_url() -> Result<String, String> {
-    // 1. 优先使用配置文件中缓存的端口（不验证，直接使用）
-    if let Some(port) = read_cached_api_port() {
-        return Ok(format!("http://127.0.0.1:{}", port));
-    }
-
-    // 2. 如果没有缓存，自动检测并保存
-    println!("未找到缓存的端口配置，开始自动检测...");
-    if let Some(port) = detect_api_port(None).await {
-        write_cached_api_port(port);
-        Ok(format!("http://127.0.0.1:{}", port))
-    } else {
-        Err("无法检测到比特浏览器 API 端口，请确保比特浏览器正在运行".to_string())
-    }
-}
-
-// ==================== API 端口缓存管理 ====================
-
-/// 获取 API 端口缓存文件路径
-fn get_api_port_cache_path() -> Option<PathBuf> {
-    if let Some(home_dir) = dirs::home_dir() {
-        let cache_dir = home_dir.join(".bitbrowser");
-        if !cache_dir.exists() {
-            let _ = fs::create_dir_all(&cache_dir);
-        }
-        Some(cache_dir.join("api_port_cache.txt"))
-    } else {
-        None
-    }
-}
-
-/// 读取缓存的 API 端口
-fn read_cached_api_port() -> Option<u16> {
-    if let Some(cache_path) = get_api_port_cache_path() {
-        if cache_path.exists() {
-            if let Ok(mut file) = fs::File::open(&cache_path) {
-                let mut contents = String::new();
-                if file.read_to_string(&mut contents).is_ok() {
-                    if let Ok(port) = contents.trim().parse::<u16>() {
-                        println!("✓ 从缓存读取 API 端口: {}", port);
-                        return Some(port);
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// 写入 API 端口到缓存
-fn write_cached_api_port(port: u16) {
-    if let Some(cache_path) = get_api_port_cache_path() {
-        if let Ok(mut file) = fs::File::create(&cache_path) {
-            let _ = file.write_all(port.to_string().as_bytes());
-            println!("✓ API 端口已缓存: {}", port);
-        }
-    }
+    Ok(format!("http://127.0.0.1:{}", DEFAULT_API_PORT))
 }
 

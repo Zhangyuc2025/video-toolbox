@@ -7,6 +7,11 @@
 // BitBrowser 管理模块
 mod bitbrowser_manager;
 
+// BitBrowser 新架构模块
+mod bitbrowser_detector;
+mod bitbrowser_launcher;
+mod bitbrowser_monitor;
+
 // 配置管理模块
 mod config_manager;
 
@@ -15,10 +20,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Manager};
-use tokio::time::{sleep, Duration};
+use tauri::Manager;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ApiResponse {
@@ -40,14 +44,6 @@ struct BrowserInfo {
     is_running: bool,
 }
 
-// 状态监控数据
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StatusMonitorData {
-    connected: bool,
-    message: String,
-    timestamp: u64,
-}
-
 // 应用运行时状态
 struct AppState {
     // 浏览器列表缓存
@@ -56,7 +52,7 @@ struct AppState {
     checking_cookies: Mutex<HashSet<String>>,
     // 比特浏览器连接状态
     bitbrowser_connected: Mutex<bool>,
-    // 状态监控是否运行
+    // 后台监控任务运行标志
     monitor_running: Arc<AtomicBool>,
 }
 
@@ -67,46 +63,42 @@ async fn get_bb_api_url() -> Result<String, String> {
     bitbrowser_manager::get_api_base_url().await
 }
 
-// 获取比特浏览器状态
+/// 创建 HTTP 客户端（禁用代理以访问 localhost）
+///
+/// 重要：reqwest 默认会使用系统代理，即使访问 localhost 也可能通过代理，
+/// 导致 502 错误。使用 .no_proxy() 禁用代理可以解决此问题。
+fn create_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()  // 禁用代理（关键！）
+        .build()
+        .expect("Failed to create HTTP client")
+}
+
+/// 创建带超时的 HTTP 客户端
+fn create_http_client_with_timeout(timeout_secs: u64) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .no_proxy()  // 禁用代理（关键！）
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|e| format!("创建HTTP客户端失败: {}", e))
+}
+
+// 获取比特浏览器状态（使用新的 detector）
 #[tauri::command]
 async fn check_bitbrowser_status() -> Result<ApiResponse, String> {
-    // 使用自动检测的 API 地址
-    let base_url = match bitbrowser_manager::get_api_base_url().await {
-        Ok(url) => url,
-        Err(e) => {
-            return Ok(ApiResponse {
-                success: false,
-                message: e,
-                data: None,
-            });
-        }
-    };
+    use bitbrowser_detector::ConnectionStatus;
 
-    let client = reqwest::Client::new();
-    match client
-        .post(format!("{}/browser/list", base_url))
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-    {
-        Ok(response) => {
-            if response.status().is_success() {
-                Ok(ApiResponse {
-                    success: true,
-                    message: "比特浏览器已连接".to_string(),
-                    data: None,
-                })
-            } else {
-                Ok(ApiResponse {
-                    success: false,
-                    message: "比特浏览器连接失败".to_string(),
-                    data: None,
-                })
-            }
-        }
-        Err(e) => Ok(ApiResponse {
+    let status = bitbrowser_detector::check_status().await;
+
+    match status {
+        ConnectionStatus::Connected { message } => Ok(ApiResponse {
+            success: true,
+            message,
+            data: None,
+        }),
+        ConnectionStatus::Disconnected { message, .. } => Ok(ApiResponse {
             success: false,
-            message: format!("比特浏览器未运行: {}", e),
+            message,
             data: None,
         }),
     }
@@ -122,7 +114,7 @@ async fn check_bitbrowser_running() -> Result<ApiResponse, String> {
 #[tauri::command]
 async fn open_bitbrowser(browser_id: String) -> Result<ApiResponse, String> {
     let base_url = get_bb_api_url().await?;
-    let client = reqwest::Client::new();
+    let client = create_http_client();
     match client
         .post(format!("{}/browser/open", base_url))
         .json(&serde_json::json!({
@@ -219,158 +211,6 @@ fn update_bitbrowser_status(state: tauri::State<AppState>, connected: bool) {
     *status = connected;
 }
 
-// 后台状态监控任务
-async fn status_monitor_task(app_handle: AppHandle, monitor_running: Arc<AtomicBool>) {
-    let mut interval = Duration::from_secs(10); // 默认10秒
-    let mut consecutive_failures = 0;
-
-    while monitor_running.load(Ordering::Relaxed) {
-        // 检查连接状态
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap();
-
-        let (connected, message) = match get_bb_api_url().await {
-            Ok(base_url) => {
-                match client
-                    .post(format!("{}/browser/list", base_url))
-                    .json(&serde_json::json!({}))
-                    .send()
-                    .await
-                {
-                    Ok(response) => {
-                        if response.status().is_success() {
-                            consecutive_failures = 0;
-                            interval = Duration::from_secs(10); // 连接成功，恢复正常间隔
-                            (true, "比特浏览器已连接".to_string())
-                        } else {
-                            consecutive_failures += 1;
-                            (false, "比特浏览器连接失败".to_string())
-                        }
-                    }
-                    Err(e) => {
-                        consecutive_failures += 1;
-                        (false, format!("比特浏览器未运行: {}", e))
-                    }
-                }
-            }
-            Err(e) => {
-                consecutive_failures += 1;
-                (false, format!("无法连接比特浏览器: {}", e))
-            }
-        };
-
-        // 指数退避策略：根据连续失败次数调整检测间隔
-        if !connected {
-            interval = if consecutive_failures <= 3 {
-                Duration::from_secs(3) // 前3次快速重试（可能是短暂断开）
-            } else if consecutive_failures <= 10 {
-                Duration::from_secs(10) // 4-10次中等间隔
-            } else {
-                Duration::from_secs(30) // 10次以上降低频率（可能长时间离线）
-            };
-
-            // 连续失败5次时的处理策略
-            if consecutive_failures == 5 {
-                if !bitbrowser_manager::is_bitbrowser_running() {
-                    // 进程未运行，尝试自动启动
-                    println!("检测到 BitBrowser 未运行，尝试自动启动...");
-                    if let Err(e) = bitbrowser_manager::start_bitbrowser(None) {
-                        println!("自动启动 BitBrowser 失败: {}", e);
-                    } else {
-                        println!("BitBrowser 启动命令已发送，等待服务启动...");
-                        sleep(Duration::from_secs(5)).await;
-
-                        // 尝试检测端口（后台任务，无需用户确认）
-                        println!("检测 API 端口...");
-                        if let Some(port) = bitbrowser_manager::detect_api_port(None).await {
-                            println!("✓ 检测到端口: {}, 已保存", port);
-                        }
-                        continue; // 跳过本次等待，立即检测
-                    }
-                } else {
-                    // 进程运行中但连接失败，可能是端口变了
-                    println!("BitBrowser 进程运行中但 API 连接失败，重新检测端口...");
-                    if let Some(port) = bitbrowser_manager::detect_api_port(None).await {
-                        println!("✓ 检测到新端口: {}, 已更新配置", port);
-                        consecutive_failures = 0; // 重置失败计数
-                    } else {
-                        println!("⚠ 无法检测到有效的 API 端口");
-                    }
-                }
-            }
-        }
-
-        // 发送事件到前端
-        let status_data = StatusMonitorData {
-            connected,
-            message,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        };
-
-        let _ = app_handle.emit_all("bitbrowser-status", status_data);
-
-        // 等待下一次检查
-        sleep(interval).await;
-    }
-}
-
-// 启动状态监控
-#[tauri::command]
-async fn start_status_monitor(
-    app_handle: AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<ApiResponse, String> {
-    let is_running = state.monitor_running.load(Ordering::Relaxed);
-
-    if is_running {
-        return Ok(ApiResponse {
-            success: false,
-            message: "状态监控已经在运行中".to_string(),
-            data: None,
-        });
-    }
-
-    // 设置运行标志
-    state.monitor_running.store(true, Ordering::Relaxed);
-
-    // 克隆Arc用于后台任务
-    let monitor_running = state.monitor_running.clone();
-
-    // 启动后台任务
-    tauri::async_runtime::spawn(async move {
-        status_monitor_task(app_handle, monitor_running).await;
-    });
-
-    Ok(ApiResponse {
-        success: true,
-        message: "状态监控已启动".to_string(),
-        data: None,
-    })
-}
-
-// 停止状态监控
-#[tauri::command]
-fn stop_status_monitor(state: tauri::State<AppState>) -> Result<ApiResponse, String> {
-    state.monitor_running.store(false, Ordering::Relaxed);
-
-    Ok(ApiResponse {
-        success: true,
-        message: "状态监控已停止".to_string(),
-        data: None,
-    })
-}
-
-// 获取监控状态
-#[tauri::command]
-fn get_monitor_status(state: tauri::State<AppState>) -> bool {
-    state.monitor_running.load(Ordering::Relaxed)
-}
-
 // ==================== BitBrowser 管理命令 ====================
 
 // 查找 BitBrowser 路径
@@ -406,48 +246,16 @@ fn get_bitbrowser_info() -> Result<ApiResponse, String> {
     })
 }
 
-// 启动 BitBrowser
+// 启动 BitBrowser（使用新的 launcher）
 #[tauri::command]
 async fn launch_bitbrowser(path: Option<String>) -> Result<ApiResponse, String> {
-    // 1. 启动比特浏览器客户端
-    match bitbrowser_manager::start_bitbrowser(path) {
-        Ok(_) => {
-            println!("BitBrowser 客户端启动成功，等待服务就绪...");
+    let result = bitbrowser_launcher::launch(path).await;
 
-            // 2. 等待服务启动（最多等待30秒）
-            tokio::time::sleep(Duration::from_secs(3)).await;
-
-            // 3. 自动检测并保存 API 端口
-            println!("开始检测 BitBrowser API 端口...");
-            for attempt in 1..=10 {
-                if let Some(port) = bitbrowser_manager::detect_api_port(None).await {
-                    println!("✓ 检测到 API 端口: {}, 已保存到配置", port);
-                    return Ok(ApiResponse {
-                        success: true,
-                        message: format!("BitBrowser 启动成功，API 端口: {}", port),
-                        data: Some(serde_json::json!({"port": port})),
-                    });
-                }
-
-                if attempt < 10 {
-                    println!("  第 {} 次检测失败，3秒后重试...", attempt);
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                }
-            }
-
-            // 检测失败但客户端已启动
-            Ok(ApiResponse {
-                success: true,
-                message: "BitBrowser 已启动，但未能自动检测到 API 端口，请手动检查".to_string(),
-                data: None,
-            })
-        }
-        Err(e) => Ok(ApiResponse {
-            success: false,
-            message: e,
-            data: None,
-        }),
-    }
+    Ok(ApiResponse {
+        success: result.success,
+        message: result.message,
+        data: None,
+    })
 }
 
 // 停止 BitBrowser
@@ -476,6 +284,39 @@ fn clear_bitbrowser_cache() -> Result<ApiResponse, String> {
         message: "路径缓存已清除".to_string(),
         data: None,
     })
+}
+
+// 关闭指定 PID 的进程
+#[tauri::command]
+fn kill_process_by_pid(pid: u32) -> Result<ApiResponse, String> {
+    use sysinfo::System;
+
+    let mut system = System::new_all();
+    system.refresh_processes();
+
+    let sys_pid = sysinfo::Pid::from_u32(pid);
+
+    if let Some(process) = system.process(sys_pid) {
+        if process.kill() {
+            Ok(ApiResponse {
+                success: true,
+                message: format!("已关闭进程 PID: {}", pid),
+                data: None,
+            })
+        } else {
+            Ok(ApiResponse {
+                success: false,
+                message: format!("无法关闭进程 PID: {}", pid),
+                data: None,
+            })
+        }
+    } else {
+        Ok(ApiResponse {
+            success: false,
+            message: format!("未找到进程 PID: {}", pid),
+            data: None,
+        })
+    }
 }
 
 // ==================== 微信登录相关 ====================
@@ -509,10 +350,7 @@ async fn generate_channels_helper_qr(
 ) -> Result<serde_json::Value, String> {
     use uuid::Uuid;
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("创建HTTP客户端失败: {}", e))?;
+    let client = create_http_client_with_timeout(30)?;
 
     let aid = Uuid::new_v4().to_string();
     let rid = Uuid::new_v4().to_string().replace("-", "");
@@ -618,10 +456,7 @@ async fn generate_channels_helper_qr(
 async fn generate_shop_helper_qr(
     state: tauri::State<'_, LoginState>,
 ) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("创建HTTP客户端失败: {}", e))?;
+    let client = create_http_client_with_timeout(30)?;
 
     let url = "https://store.weixin.qq.com/shop-faas/mmeckolnode/getLoginQrCode";
 
@@ -731,10 +566,7 @@ async fn check_channels_helper_status(
             .clone()
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("创建HTTP客户端失败: {}", e))?;
+    let client = create_http_client_with_timeout(10)?;
 
     let aid = Uuid::new_v4().to_string();
     let rid = Uuid::new_v4().to_string().replace("-", "");
@@ -951,10 +783,7 @@ async fn check_shop_helper_status(
             .clone()
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("创建HTTP客户端失败: {}", e))?;
+    let client = create_http_client_with_timeout(10)?;
 
     let url = "https://store.weixin.qq.com/shop-faas/mmeckolnode/queryLoginQrCode";
 
@@ -1112,7 +941,7 @@ async fn create_browser_with_account(
     cookie: String,
     nickname: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::new();
+    let client = create_http_client();
 
     // 如果没有提供 nickname，获取下一个序号
     let browser_name = if let Some(name) = nickname {
@@ -1200,7 +1029,7 @@ async fn create_browser_with_account(
 // 同步Cookie到浏览器（用于链接登录）
 #[tauri::command]
 async fn sync_cookie_to_browser(browser_id: String, cookie: String) -> Result<ApiResponse, String> {
-    let client = reqwest::Client::new();
+    let client = create_http_client();
 
     println!("[同步Cookie] 浏览器ID: {}", browser_id);
 
@@ -1310,7 +1139,7 @@ async fn sync_cookie_to_browser(browser_id: String, cookie: String) -> Result<Ap
 #[tauri::command]
 async fn get_group_list() -> Result<ApiResponse, String> {
     let base_url = get_bb_api_url().await?;
-    let client = reqwest::Client::new();
+    let client = create_http_client();
 
     let response = client
         .post(format!("{}/group/list", base_url))
@@ -1350,7 +1179,7 @@ async fn get_browser_list(
     created_name: Option<String>,
 ) -> Result<ApiResponse, String> {
     let base_url = get_bb_api_url().await?;
-    let client = reqwest::Client::new();
+    let client = create_http_client();
 
     let response = client
         .post(format!("{}/browser/list", base_url))
@@ -1422,7 +1251,7 @@ async fn open_browser(
     clear_cookies: Option<bool>,
 ) -> Result<ApiResponse, String> {
     let base_url = get_bb_api_url().await?;
-    let client = reqwest::Client::new();
+    let client = create_http_client();
 
     let mut payload = serde_json::json!({
         "id": browser_id
@@ -1480,7 +1309,7 @@ async fn open_browser(
 #[tauri::command]
 async fn close_browser(browser_id: String) -> Result<ApiResponse, String> {
     let base_url = get_bb_api_url().await?;
-    let client = reqwest::Client::new();
+    let client = create_http_client();
 
     let response = client
         .post(format!("{}/browser/close", base_url))
@@ -1515,7 +1344,7 @@ async fn close_browser(browser_id: String) -> Result<ApiResponse, String> {
 #[tauri::command]
 async fn delete_browser(browser_id: String) -> Result<ApiResponse, String> {
     let base_url = get_bb_api_url().await?;
-    let client = reqwest::Client::new();
+    let client = create_http_client();
 
     let response = client
         .post(format!("{}/browser/delete", base_url))
@@ -1550,7 +1379,7 @@ async fn delete_browser(browser_id: String) -> Result<ApiResponse, String> {
 #[tauri::command]
 async fn update_browser_name(browser_id: String, name: String) -> Result<ApiResponse, String> {
     let base_url = get_bb_api_url().await?;
-    let client = reqwest::Client::new();
+    let client = create_http_client();
 
     println!(
         "[更新浏览器名称] 浏览器ID: {}, 新名称: {}",
@@ -1641,7 +1470,7 @@ async fn update_browser_name(browser_id: String, name: String) -> Result<ApiResp
 #[tauri::command]
 async fn get_browser_cookies(browser_id: String) -> Result<ApiResponse, String> {
     let base_url = get_bb_api_url().await?;
-    let client = reqwest::Client::new();
+    let client = create_http_client();
 
     // 调用 browser/detail 获取浏览器详情
     let response = client
@@ -1710,7 +1539,7 @@ fn main() {
             browser_list: Mutex::new(Vec::new()),
             checking_cookies: Mutex::new(HashSet::new()),
             bitbrowser_connected: Mutex::new(false),
-            monitor_running: Arc::new(AtomicBool::new(false)),
+            monitor_running: Arc::new(AtomicBool::new(true)),
         })
         // 初始化登录状态
         .manage(LoginState {
@@ -1721,6 +1550,19 @@ fn main() {
         .manage(config_manager::ConfigManager::new())
         // 注册Store插件
         .plugin(tauri_plugin_store::Builder::default().build())
+        // 启动后台监控任务
+        .setup(|app| {
+            let app_handle = app.handle();
+            let state = app.state::<AppState>();
+            let monitor_running = state.monitor_running.clone();
+
+            // 启动后台监控任务
+            tauri::async_runtime::spawn(async move {
+                bitbrowser_monitor::start_monitor(app_handle, monitor_running).await;
+            });
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             check_bitbrowser_status,
             check_bitbrowser_running,
@@ -1733,15 +1575,13 @@ fn main() {
             remove_checking_cookie,
             get_bitbrowser_status,
             update_bitbrowser_status,
-            start_status_monitor,
-            stop_status_monitor,
-            get_monitor_status,
             // BitBrowser 管理命令
             find_bitbrowser,
             get_bitbrowser_info,
             launch_bitbrowser,
             stop_bitbrowser,
             clear_bitbrowser_cache,
+            kill_process_by_pid,
             // 微信登录命令
             generate_login_qr,
             check_qr_status,
@@ -1777,7 +1617,6 @@ fn main() {
                                                    // bitbrowser_sidecar::bb_batch_open_browsers,
                                                    // bitbrowser_sidecar::bb_batch_close_browsers,
         ])
-        .setup(|_app| Ok(()))
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

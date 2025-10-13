@@ -6,6 +6,9 @@ import axios from 'axios';
 // 云服务URL（已迁移到 Cloudflare Workers，使用自定义域名避免 DNS 污染）
 const CLOUD_SERVICE_URL = import.meta.env.VITE_CLOUD_SERVICE_URL || 'https://api.quanyuge.cloud';
 
+// 配置 axios 全局超时（30秒，适应微信API可能的延迟）
+axios.defaults.timeout = 30000;
+
 // API端点（已更新为动态路由格式）
 const API_ENDPOINTS = {
   GENERATE_LINK: `${CLOUD_SERVICE_URL}/api/generate-link`,
@@ -43,22 +46,19 @@ export interface SyncCookieResult {
 }
 
 /**
- * 检查状态结果
+ * 检查状态结果 (V2 简化版)
  */
 export interface CheckStatusResult {
   success: boolean;
-  scanned: boolean;
-  expired: boolean;
-  linkOpened?: boolean;
-  wechatStatus?: number;  // 微信原始状态：视频号助手 0/5/1, 小店助手 1/2/3
-  owner?: string;  // 拥有者（多用户隔离）
+  scanned: boolean;        // 是否已扫码
+  confirmed: boolean;      // 是否已确认登录
+  expired: boolean;        // 是否已过期
+  owner?: string;          // 拥有者（多用户隔离）
   nickname?: string;
   avatar?: string;
   loginMethod?: string;
   browserId?: string;
   cookies?: any[];
-  qrExpired?: boolean;
-  newQrUrl?: string;
   message?: string;
 }
 
@@ -66,7 +66,7 @@ export interface CheckStatusResult {
  * 账号Cookie状态
  */
 export interface AccountCookieStatus {
-  cookieStatus: 'pending' | 'online' | 'offline' | 'checking';
+  cookieStatus: 'pending' | 'online' | 'offline' | 'checking' | 'not_found';  // V2 新增 not_found 状态
   lastCheckTime: string | null;
   lastValidTime: string | null;
   cookieUpdatedAt: string | null;  // Cookie获取时间
@@ -153,15 +153,23 @@ export class CloudService {
 
   /**
    * 检查扫码状态
+   * @param browserId 浏览器ID
+   * @param signal AbortSignal，用于取消请求
    */
-  static async checkLinkStatus(browserId: string): Promise<CheckStatusResult> {
+  static async checkLinkStatus(browserId: string, signal?: AbortSignal): Promise<CheckStatusResult> {
     try {
       const response = await axios.get(API_ENDPOINTS.CHECK_STATUS, {
-        params: { browserId }
+        params: { browserId },
+        signal  // ✅ 支持 AbortSignal
       });
 
       return response.data;
     } catch (error: any) {
+      // 请求被取消，直接抛出让调用方处理
+      if (axios.isCancel(error) || error.name === 'CanceledError') {
+        throw error;
+      }
+
       console.error('[CloudService] 检查扫码状态失败:', error);
       return {
         success: false,

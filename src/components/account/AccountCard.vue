@@ -343,7 +343,11 @@ const handleDropdownSelect = (key: string) => {
             <icon-mdi:stop v-if="isRunning" />
             <icon-mdi:play v-else />
           </template>
-          {{ isRunning ? '关闭' : (cookieStatusInfo.isValid ? `打开 #${browser.seq}` : `请重新登录 #${browser.seq}`) }}
+          {{
+            isRunning ? '关闭' :
+            (cookieStatusInfo.text === '未登录' ? `等待登录 #${browser.seq}` :
+            (cookieStatusInfo.isValid ? `打开 #${browser.seq}` : `请重新登录 #${browser.seq}`))
+          }}
         </NButton>
 
         <!-- 次要操作：溢出菜单 -->

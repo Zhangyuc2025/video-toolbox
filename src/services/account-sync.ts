@@ -160,9 +160,17 @@ export class AccountSyncService {
 
       // 4. 状态矩阵判断
 
-      // 场景1: 本地无Cookie + 云端无记录 → 跳过
+      // 场景1: 本地无Cookie + 云端无记录 → 自动注册到云端（生成永久链接）
       if (!hasLocalCookie && !hasCloudRecord) {
-        return { success: true, action: 'skip', message: '等待用户登录' };
+        try {
+          console.log(`[账号同步] 自动注册到云端: ${browserId}`);
+          // 使用默认 channels_helper，上号人员可以在云端登录页面切换
+          await CloudService.generatePermanentLink(browserId, 'channels_helper', {});
+          return { success: true, action: 'local_to_cloud', message: '已注册到云端，等待扫码登录' };
+        } catch (error) {
+          console.error(`[账号同步] 自动注册失败: ${browserId}`, error);
+          return { success: true, action: 'skip', message: '自动注册失败，跳过' };
+        }
       }
 
       // 场景2: 本地无Cookie + 云端有记录但无Cookie → 跳过

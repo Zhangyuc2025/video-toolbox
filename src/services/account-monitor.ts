@@ -25,6 +25,8 @@ import { notification } from '@/utils';
 import { realtimePushService } from './realtime-push';
 import { AccountSyncService } from './account-sync';
 import { useBrowserStore } from '@/store/modules/browser';
+import { PushDataHandler } from './push-data-handler';
+import type { CloudPushData } from '@/types/push';
 
 /**
  * 状态缓存配置
@@ -84,15 +86,18 @@ export class AccountMonitorService {
    * 启动监控服务
    */
   static async start() {
-    // 立即执行一次同步（获取初始状态）
-    await this.syncAllStatus();
-
-    // 订阅Realtime推送
+    // ✅ 优先订阅 Realtime 推送（秒级完成，立即可用）
     const { success: realtimeSubscribed, reason } = await this.subscribeToRealtimeUpdates();
 
     if (!realtimeSubscribed && reason !== 'no_accounts') {
       console.warn('[账号监控] Realtime不可用，将无法接收Cookie失效的实时通知');
     }
+
+    // ✅ 后台同步云端状态（可能慢，但不阻塞 Realtime）
+    // 即使失败也不影响 Realtime 推送功能
+    this.syncAllStatus().catch(error => {
+      console.warn('[账号监控] 后台同步失败（不影响 Realtime）:', error);
+    });
   }
 
   /**
@@ -148,103 +153,68 @@ export class AccountMonitorService {
         return { success: false, reason: 'no_accounts' };
       }
 
-      // 订阅Realtime推送（为每个账号注册回调）
-      const callback = async (data: any) => {
+      // ✅ 订阅Realtime推送（使用统一推送处理器）
+      const callback = async (data: CloudPushData) => {
         if (!data.browserId) {
           return;
         }
 
-        // 获取旧状态（用于判断状态变化）
-        const oldStatus = cloudStatusCache.value[data.browserId]?.cookieStatus;
-        const oldNickname = cloudStatusCache.value[data.browserId]?.accountInfo?.nickname;
+        try {
+          // ✅ 使用统一推送处理器
+          const result = await PushDataHandler.processUpdate(
+            data,
+            cloudStatusCache.value,
+            expiredAccountsBuffer
+          );
 
-        // ✅ 创建新对象引用，触发 Vue 响应式更新
-        const now = Date.now();
-        const normalizedStatus = normalizeCookieStatus(data.cookieStatus);
-        cloudStatusCache.value = {
-          ...cloudStatusCache.value,
-          [data.browserId]: {
-            cookieStatus: normalizedStatus,
-            lastCheckTime: new Date().toISOString(),
-            lastValidTime: normalizedStatus === 'online' ? new Date().toISOString() : cloudStatusCache.value[data.browserId]?.lastValidTime,
-            cookieUpdatedAt: cloudStatusCache.value[data.browserId]?.cookieUpdatedAt,
-            cookieExpiredAt: data.cookieExpiredAt,
-            checkErrorCount: 0,
-            cachedAt: now,
-            accountInfo: data.nickname ? {
-              nickname: data.nickname,
-              avatar: data.avatar,
-              loginMethod: data.loginMethod
-            } : cloudStatusCache.value[data.browserId]?.accountInfo
-          }
-        };
-
-        // 保存缓存
-        this.saveCacheToStorage();
-
-        // ✅ 检测到账号信息变化，更新浏览器名称
-        if (data.nickname && data.nickname !== oldNickname) {
-          try {
-            await invoke('update_browser_name', {
-              browserId: data.browserId,
-              name: data.nickname
-            });
-            console.log(`[账号监控] 浏览器名称已更新: ${data.browserId} -> ${data.nickname}`);
-          } catch (error) {
-            console.error(`[账号监控] 更新浏览器名称失败:`, error);
-          }
-        }
-
-        // ✅ 只在状态变化为 online 时才同步（避免重复同步导致循环）
-        if (data.cookieStatus === 'online' && oldStatus !== 'online') {
-          // 使用 AccountSyncService 统一处理 Cookie 同步（不强制，让其自行判断）
-          AccountSyncService.syncSingle(data.browserId, false).catch(err => {
-            console.error(`[账号监控] Cookie恢复失败:`, err);
-          });
-        }
-
-        // ✅ 如果Cookie失效（online → offline），执行清理操作
-        if (data.cookieStatus === 'offline' && oldStatus === 'online') {
-          const account = allAccounts[data.browserId];
-          const nickname = data.nickname || account?.accountInfo?.nickname || data.browserId;
-
-          console.log(`[账号监控] 检测到账号掉线: ${nickname} (${data.browserId})`);
-
-          // 1. 自动关闭正在运行的浏览器
-          invoke('close_browser', { browserId: data.browserId })
-            .then(() => {
-              console.log(`[账号监控] 已自动关闭浏览器: ${nickname}`);
-
-              // ✅ 更新浏览器运行状态,确保UI按钮状态正确
-              const browserStore = useBrowserStore();
-              browserStore.updateBrowserRunningStatus(data.browserId, false);
-            })
-            .catch((error) => {
-              console.error(`[账号监控] 自动关闭浏览器失败:`, error);
-            });
-
-          // 2. 添加到通知缓冲区（防抖通知）
-          if (!expiredAccountsBuffer.includes(nickname)) {
-            expiredAccountsBuffer.push(nickname);
+          if (!result.success) {
+            console.error(`[账号监控] 推送处理失败: ${data.browserId}`, result.error);
+            return;
           }
 
-          // 启动防抖定时器（5秒后统一发送）
-          if (expiredNotificationTimer) {
-            clearTimeout(expiredNotificationTimer);
-          }
-          expiredNotificationTimer = setTimeout(() => {
-            if (expiredAccountsBuffer.length > 0) {
-              this.notifyExpiredAccounts([...expiredAccountsBuffer]);
-              expiredAccountsBuffer.length = 0; // 清空缓冲区
+          // ✅ 创建新对象引用，触发 Vue 响应式更新
+          cloudStatusCache.value = {
+            ...cloudStatusCache.value,
+            [data.browserId]: result.cached
+          };
+
+          // 保存缓存
+          await this.saveCacheToStorage();
+
+          // ✅ 启动防抖定时器（5秒后统一发送失效通知）
+          if (expiredAccountsBuffer.length > 0) {
+            if (expiredNotificationTimer) {
+              clearTimeout(expiredNotificationTimer);
             }
-            expiredNotificationTimer = null;
-          }, 5000);
+            expiredNotificationTimer = setTimeout(() => {
+              if (expiredAccountsBuffer.length > 0) {
+                this.notifyExpiredAccounts([...expiredAccountsBuffer]);
+                expiredAccountsBuffer.length = 0; // 清空缓冲区
+              }
+              expiredNotificationTimer = null;
+            }, 5000);
+          }
+        } catch (error) {
+          console.error(`[账号监控] 推送处理异常: ${data.browserId}`, error);
         }
       };
 
-      // 为每个账号订阅
+      // ✅ 先批量查询云端状态，只订阅存在的账号
+      console.log(`[账号监控] 正在验证 ${browserIds.length} 个账号是否存在于云端...`);
+      const cloudResult = await CloudService.batchCheckStatus(browserIds);
+
+      if (!cloudResult) {
+        console.warn(`[账号监控] 云端查询失败，跳过订阅`);
+        return { success: false, reason: 'cloud_query_failed' };
+      }
+
+      // 只订阅云端存在的账号
+      const existingBrowserIds = Object.keys(cloudResult.accounts);
+      console.log(`[账号监控] 云端存在 ${existingBrowserIds.length}/${browserIds.length} 个账号`);
+
+      // 为每个存在的账号订阅
       let successCount = 0;
-      browserIds.forEach(browserId => {
+      existingBrowserIds.forEach(browserId => {
         if (realtimePushService.subscribe(browserId, callback)) {
           successCount++;
         }
@@ -254,9 +224,9 @@ export class AccountMonitorService {
 
       // ✅ 输出订阅结果日志
       if (success) {
-        console.log(`[账号监控] ✅ 已订阅 ${successCount}/${browserIds.length} 个账号的 Realtime 推送`);
+        console.log(`[账号监控] ✅ 已订阅 ${successCount}/${existingBrowserIds.length} 个账号的 Realtime 推送`);
       } else {
-        console.warn(`[账号监控] ⚠️ Realtime 订阅失败，browserIds: ${browserIds.length}`);
+        console.warn(`[账号监控] ⚠️ Realtime 订阅失败，browserIds: ${existingBrowserIds.length}`);
       }
 
       return { success };
@@ -302,98 +272,51 @@ export class AccountMonitorService {
   static subscribeNewAccount(
     browserId: string,
     accountInfo?: { nickname?: string },
-    additionalCallback?: (data: any) => void
+    additionalCallback?: (data: CloudPushData) => void
   ): boolean {
-    // 注册监控回调
-    const callback = async (data: any) => {
+    // ✅ 注册监控回调（使用统一推送处理器）
+    const callback = async (data: CloudPushData) => {
       if (!data.browserId) {
         return;
       }
 
-      // 获取旧状态（用于判断状态变化）
-      const oldStatus = cloudStatusCache.value[data.browserId]?.cookieStatus;
-      const oldNickname = cloudStatusCache.value[data.browserId]?.accountInfo?.nickname;
+      try {
+        // ✅ 使用统一推送处理器（复用逻辑）
+        const result = await PushDataHandler.processUpdate(
+          data,
+          cloudStatusCache.value,
+          expiredAccountsBuffer
+        );
 
-      // ✅ 创建新对象引用，触发 Vue 响应式更新
-      const now = Date.now();
-      const normalizedStatus = normalizeCookieStatus(data.cookieStatus);
-      cloudStatusCache.value = {
-        ...cloudStatusCache.value,
-        [data.browserId]: {
-          cookieStatus: normalizedStatus,
-          lastCheckTime: new Date().toISOString(),
-          lastValidTime: normalizedStatus === 'online' ? new Date().toISOString() : cloudStatusCache.value[data.browserId]?.lastValidTime,
-          cookieUpdatedAt: cloudStatusCache.value[data.browserId]?.cookieUpdatedAt,
-          cookieExpiredAt: data.cookieExpiredAt,
-          checkErrorCount: 0,
-          cachedAt: now,
-          accountInfo: data.nickname ? {
-            nickname: data.nickname,
-            avatar: data.avatar,
-            loginMethod: data.loginMethod
-          } : cloudStatusCache.value[data.browserId]?.accountInfo
-        }
-      };
-
-      // 保存缓存
-      this.saveCacheToStorage();
-
-      // ✅ 检测到账号信息变化，更新浏览器名称
-      if (data.nickname && data.nickname !== oldNickname) {
-        try {
-          await invoke('update_browser_name', {
-            browserId: data.browserId,
-            name: data.nickname
-          });
-          console.log(`[账号监控] 浏览器名称已更新: ${data.browserId} -> ${data.nickname}`);
-        } catch (error) {
-          console.error(`[账号监控] 更新浏览器名称失败:`, error);
-        }
-      }
-
-      // ✅ 只在状态变化为 online 时才同步（避免重复同步导致循环）
-      if (data.cookieStatus === 'online' && oldStatus !== 'online') {
-        // 使用 AccountSyncService 统一处理 Cookie 同步（不强制，让其自行判断）
-        AccountSyncService.syncSingle(data.browserId, false).catch(err => {
-          console.error(`[账号监控] Cookie恢复失败:`, err);
-        });
-      }
-
-      // ✅ 如果Cookie失效（online → offline），执行清理操作
-      if (data.cookieStatus === 'offline' && oldStatus === 'online') {
-        const nickname = data.nickname || accountInfo?.nickname || data.browserId;
-
-        console.log(`[账号监控] 检测到账号掉线: ${nickname} (${data.browserId})`);
-
-        // 1. 自动关闭正在运行的浏览器
-        invoke('close_browser', { browserId: data.browserId })
-          .then(() => {
-            console.log(`[账号监控] 已自动关闭浏览器: ${nickname}`);
-
-            // ✅ 更新浏览器运行状态,确保UI按钮状态正确
-            const browserStore = useBrowserStore();
-            browserStore.updateBrowserRunningStatus(data.browserId, false);
-          })
-          .catch((error) => {
-            console.error(`[账号监控] 自动关闭浏览器失败:`, error);
-          });
-
-        // 2. 添加到通知缓冲区（防抖通知）
-        if (!expiredAccountsBuffer.includes(nickname)) {
-          expiredAccountsBuffer.push(nickname);
+        if (!result.success) {
+          console.error(`[账号监控] 推送处理失败: ${data.browserId}`, result.error);
+          return;
         }
 
-        // 启动防抖定时器（5秒后统一发送）
-        if (expiredNotificationTimer) {
-          clearTimeout(expiredNotificationTimer);
-        }
-        expiredNotificationTimer = setTimeout(() => {
-          if (expiredAccountsBuffer.length > 0) {
-            AccountMonitorService.notifyExpiredAccounts([...expiredAccountsBuffer]);
-            expiredAccountsBuffer.length = 0; // 清空缓冲区
+        // ✅ 创建新对象引用，触发 Vue 响应式更新
+        cloudStatusCache.value = {
+          ...cloudStatusCache.value,
+          [data.browserId]: result.cached
+        };
+
+        // 保存缓存
+        await this.saveCacheToStorage();
+
+        // ✅ 启动防抖定时器（5秒后统一发送失效通知）
+        if (expiredAccountsBuffer.length > 0) {
+          if (expiredNotificationTimer) {
+            clearTimeout(expiredNotificationTimer);
           }
-          expiredNotificationTimer = null;
-        }, 5000);
+          expiredNotificationTimer = setTimeout(() => {
+            if (expiredAccountsBuffer.length > 0) {
+              AccountMonitorService.notifyExpiredAccounts([...expiredAccountsBuffer]);
+              expiredAccountsBuffer.length = 0; // 清空缓冲区
+            }
+            expiredNotificationTimer = null;
+          }, 5000);
+        }
+      } catch (error) {
+        console.error(`[账号监控] 推送处理异常: ${data.browserId}`, error);
       }
     };
 
@@ -405,19 +328,9 @@ export class AccountMonitorService {
         realtimePushService.subscribe(browserId, additionalCallback);
       }
 
-      // ✅ 初始化缓存（pending 状态），创建新对象引用
-      cloudStatusCache.value = {
-        ...cloudStatusCache.value,
-        [browserId]: {
-          cookieStatus: 'pending',
-          lastCheckTime: new Date().toISOString(),
-          lastValidTime: null,
-          cookieUpdatedAt: null,
-          cookieExpiredAt: null,
-          checkErrorCount: 0,
-          cachedAt: Date.now()
-        }
-      };
+      // ✅ 订阅成功，但不初始化缓存
+      // 让 Realtime 推送或主动刷新来填充真实状态，避免显示错误的 'pending' 状态
+      console.log(`[账号监控] 已订阅 ${browserId}，等待 Realtime 推送或主动刷新填充状态`);
     }
 
     return success;
@@ -511,9 +424,11 @@ export class AccountMonitorService {
       const now = Date.now();
       const expiredAccounts: string[] = [];
 
+      // ✅ 批量更新缓存（创建新对象引用，触发响应式更新）
+      const newCache = { ...cloudStatusCache.value };
       for (const [browserId, status] of Object.entries(result.accounts)) {
         // 更新缓存（包含accountInfo）
-        cloudStatusCache.value[browserId] = {
+        newCache[browserId] = {
           cookieStatus: normalizeCookieStatus(status.cookieStatus),
           lastCheckTime: status.lastCheckTime,
           lastValidTime: status.lastValidTime,
@@ -532,6 +447,9 @@ export class AccountMonitorService {
           }
         }
       }
+
+      // ✅ 应用批量更新
+      cloudStatusCache.value = newCache;
 
       // ✅ 清理本地配置中不存在于比特浏览器的账号（已删除的浏览器）
       const allBrowserIds = Object.keys(allAccounts);  // 本地配置中的所有账号
@@ -585,12 +503,9 @@ export class AccountMonitorService {
       return null;
     }
 
-    // 检查缓存是否过期
-    const age = Date.now() - cached.cachedAt;
-    if (age > CACHE_DURATION) {
-      // 触发后台刷新
-      this.refreshAccountStatus(browserId);
-    }
+    // ✅ 不再自动刷新过期缓存
+    // 理由：已有 Realtime 实时推送，无需主动查询
+    // 如需手动刷新，UI 层可以主动调用 refreshAccountStatus
 
     return cached;
   }
@@ -602,8 +517,18 @@ export class AccountMonitorService {
     try {
       const status = await CloudService.checkAccountStatus(browserId);
 
-      if (status) {
-        cloudStatusCache.value[browserId] = {
+      if (!status) {
+        // ✅ 账号不存在（可能已删除），自动清理订阅和缓存
+        console.log(`[账号监控] 账号不存在，自动清理: ${browserId}`);
+        await realtimePushService.unsubscribe(browserId);
+        this.clearAccountCache(browserId);
+        return;
+      }
+
+      // ✅ 创建新对象引用，触发响应式更新
+      cloudStatusCache.value = {
+        ...cloudStatusCache.value,
+        [browserId]: {
           cookieStatus: normalizeCookieStatus(status.cookieStatus),
           lastCheckTime: status.lastCheckTime,
           lastValidTime: status.lastValidTime,
@@ -611,13 +536,20 @@ export class AccountMonitorService {
           cookieExpiredAt: status.cookieExpiredAt,
           checkErrorCount: status.checkErrorCount,
           cachedAt: Date.now(),
-          accountInfo: status.accountInfo  // ✅ 添加 accountInfo
-        };
+          accountInfo: status.accountInfo
+        }
+      };
 
-        await this.saveCacheToStorage();
+      await this.saveCacheToStorage();
+    } catch (error: any) {
+      // ✅ 如果是404错误，也自动清理
+      if (error.message?.includes('404') || error.message?.includes('not found')) {
+        console.log(`[账号监控] 账号不存在(404)，自动清理: ${browserId}`);
+        await realtimePushService.unsubscribe(browserId);
+        this.clearAccountCache(browserId);
+      } else {
+        console.error(`[账号监控] 刷新失败: ${browserId}`, error);
       }
-    } catch (error) {
-      console.error(`[账号监控] 刷新失败: ${browserId}`, error);
     }
   }
 
@@ -707,12 +639,37 @@ export class AccountMonitorService {
   }
 
   /**
-   * 清除缓存
+   * 手动设置账号状态（不触发订阅）
+   * 用于状态迁移或直接更新缓存
+   */
+  static setAccountStatus(browserId: string, status: Cookie.CloudStatusCache): void {
+    cloudStatusCache.value = {
+      ...cloudStatusCache.value,
+      [browserId]: status
+    };
+    this.saveCacheToStorage();
+  }
+
+  /**
+   * 清除所有缓存
    */
   static clearCache() {
     cloudStatusCache.value = {};
     lastSyncTime.value = 0;
     localStorage.removeItem('cloud_status_cache');
+  }
+
+  /**
+   * 清除单个账号的缓存
+   * 用于状态迁移（虚拟ID → 真实ID），避免触发false通知
+   */
+  static clearAccountCache(browserId: string): void {
+    if (cloudStatusCache.value[browserId]) {
+      const newCache = { ...cloudStatusCache.value };
+      delete newCache[browserId];
+      cloudStatusCache.value = newCache;
+      console.log(`[账号监控] 已清理缓存: ${browserId}`);
+    }
   }
 
   /**
@@ -783,21 +740,24 @@ export class AccountMonitorService {
           lastSyncTime: Date.now()
         });
 
-        // 7. 更新缓存（包含accountInfo）
+        // 7. 更新缓存（包含accountInfo）✅ 创建新对象引用
         const normalizedStatus = normalizeCookieStatus(registerResult.cookieStatus);
-        cloudStatusCache.value[browserId] = {
-          cookieStatus: normalizedStatus,
-          lastCheckTime: new Date().toISOString(),
-          lastValidTime: normalizedStatus === 'online' ? new Date().toISOString() : null,
-          cookieUpdatedAt: null,
-          cookieExpiredAt: null,
-          checkErrorCount: 0,
-          cachedAt: Date.now(),
-          accountInfo: registerResult.accountInfo ? {
-            nickname: registerResult.accountInfo.nickname || accountInfo.nickname,
-            avatar: registerResult.accountInfo.avatar || accountInfo.avatar,
-            loginMethod: loginMethod
-          } : null
+        cloudStatusCache.value = {
+          ...cloudStatusCache.value,
+          [browserId]: {
+            cookieStatus: normalizedStatus,
+            lastCheckTime: new Date().toISOString(),
+            lastValidTime: normalizedStatus === 'online' ? new Date().toISOString() : null,
+            cookieUpdatedAt: null,
+            cookieExpiredAt: null,
+            checkErrorCount: 0,
+            cachedAt: Date.now(),
+            accountInfo: registerResult.accountInfo ? {
+              nickname: registerResult.accountInfo.nickname || accountInfo.nickname,
+              avatar: registerResult.accountInfo.avatar || accountInfo.avatar,
+              loginMethod: loginMethod
+            } : null
+          }
         };
 
         successCount++;

@@ -1,7 +1,7 @@
 /**
  * 新增账号逻辑
  */
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, nextTick } from 'vue';
 import { invoke } from '@tauri-apps/api/tauri';
 import { notification } from '@/utils';
 import { configStore } from '@/utils/config-store';
@@ -17,6 +17,7 @@ import type {
   QRLoginResult,
   CreateBrowserResult
 } from '@/types/account';
+import type { CloudPushData } from '@/types/push';
 
 export function useAddAccount() {
   // 当前步骤 (0: 配置, 1: 登录, 2: 完成)
@@ -40,20 +41,13 @@ export function useAddAccount() {
 
   /**
    * ✅ 处理 Realtime 推送事件（包含中间状态和最终状态）
+   * 使用 CloudPushData 类型确保类型安全
    */
-  function handleRealtimePush(data: {
-    browserId: string;
-    cookies?: any;
-    nickname?: string;
-    avatar?: string;
-    loginMethod?: string;
-    wechatStatus?: number;
-    loginStatus?: string;
-    cookieStatus?: string;
-  }) {
+  function handleRealtimePush(data: CloudPushData) {
     console.log(`[useAddAccount-Realtime] 收到推送: ${data.browserId}`, {
-      wechatStatus: data.wechatStatus,
-      loginStatus: data.loginStatus,
+      scanned: data.scanned,
+      confirmed: data.confirmed,
+      expired: data.expired,
       cookieStatus: data.cookieStatus,
       nickname: data.nickname
     });
@@ -72,45 +66,48 @@ export function useAddAccount() {
       return;
     }
 
-    // ✅ 处理中间状态：loginStatus 变化
-    if (data.loginStatus) {
-      console.log(`[useAddAccount-Realtime] 更新 loginStatus: ${data.loginStatus}`);
+    // ✅ V2 简化版：使用布尔值判断状态
+    if (data.scanned && !data.confirmed) {
+      // 已扫码，等待确认
+      account.state = 'scanned';
+      account.progress = 50;
+      nextTick();  // 强制立即更新 UI
+      console.log(`[useAddAccount-Realtime] 二维码已扫描: ${data.browserId}`);
+    }
 
-      switch (data.loginStatus) {
-        case 'scanned':
-          // 已扫码
-          account.state = 'scanned';
-          account.progress = 50;
-          console.log(`[useAddAccount-Realtime] 二维码已扫描: ${data.browserId}`);
-          break;
+    if (data.confirmed) {
+      // 已确认登录
+      account.state = 'confirmed';
+      account.progress = 60;
+      nextTick();  // 强制立即更新 UI
+      console.log(`[useAddAccount-Realtime] 登录已确认: ${data.browserId}`);
+    }
 
-        case 'confirmed':
-          // 已确认
-          account.state = 'confirmed';
-          account.progress = 60;
-          console.log(`[useAddAccount-Realtime] 登录已确认: ${data.browserId}`);
-          break;
-
-        case 'expired':
-          // 二维码过期
-          account.state = 'failed';
-          account.errorMsg = '二维码已过期';
-          console.log(`[useAddAccount-Realtime] 二维码过期: ${data.browserId}`);
-          break;
-      }
+    if (data.expired) {
+      // 二维码过期
+      account.state = 'failed';
+      account.errorMsg = '二维码已过期';
+      nextTick();  // 强制立即更新 UI
+      console.log(`[useAddAccount-Realtime] 二维码过期: ${data.browserId}`);
+      return;
     }
 
     // ✅ 处理最终状态：cookieStatus 变为 online
     if (data.cookieStatus === 'online') {
       console.log(`[useAddAccount-Realtime] ✅ 检测到登录完成: ${data.browserId}`);
 
+      // ✅ 优先使用 accountInfo，fallback 到单独字段
+      const nickname = data.accountInfo?.nickname || data.nickname;
+      const avatar = data.accountInfo?.avatar || data.avatar;
+      const loginMethod = data.accountInfo?.loginMethod || data.loginMethod;
+
       // 触发登录完成处理
       handleLoginCompleted(account, {
         browserId: data.browserId,
         cookies: data.cookies || [],
-        nickname: data.nickname,
-        avatar: data.avatar,
-        loginMethod: data.loginMethod,
+        nickname,
+        avatar,
+        loginMethod,
         cookieStatus: 'online'
       });
     }
@@ -316,7 +313,7 @@ export function useAddAccount() {
       // 状态变化会通过 Realtime 推送到 handleRealtimePush 直接处理
       try {
         const status = await CloudService.checkLinkStatus(virtualBrowserId);
-        console.log(`[扫码登录] 初始状态查询: wechatStatus=${status.wechatStatus || 'unknown'}`);
+        console.log(`[扫码登录] 初始状态查询: scanned=${status.scanned}, confirmed=${status.confirmed}`);
         // 状态已通过 checkLinkStatus 更新到数据库，Realtime 会自动推送到 handleRealtimePush
       } catch (error) {
         console.error(`[扫码登录] 初始状态查询失败:`, error);
@@ -336,8 +333,8 @@ export function useAddAccount() {
 
   // ✅ 轮询定时器管理
   const pollingTimers = new Map<string, NodeJS.Timeout>();
-  // ✅ 已停止的集合（防止已停止的轮询继续执行）
-  const stoppedPolling = new Set<string>();
+  // ✅ AbortController 管理（用于取消飞行中的请求）
+  const pollingControllers = new Map<string, AbortController>();
 
   /**
    * 启动轮询检测登录状态（调用云端API）
@@ -352,48 +349,59 @@ export function useAddAccount() {
       return;
     }
 
-    stoppedPolling.delete(key);
-    console.log(`[Polling] 启动轮询 (1秒/次): ${browserId}`);
+    // 创建 AbortController，用于取消请求
+    const controller = new AbortController();
+    pollingControllers.set(key, controller);
 
-    const POLL_INTERVAL = 1000;
+    console.log(`[Polling] 启动轮询 (0.2秒/次): ${browserId}`);
+
+    const POLL_INTERVAL = 200;  // 降低到 200ms，提升响应速度
 
     async function pollStatus() {
-      if (stoppedPolling.has(key)) {
+      // 检查是否已被取消
+      if (controller.signal.aborted) {
         return;
       }
 
       try {
-        // 调用云端API检测状态（API会更新数据库）
-        const status = await CloudService.checkLinkStatus(browserId);
+        // 调用云端API检测状态（API会更新数据库），传入 signal 以支持取消
+        const status = await CloudService.checkLinkStatus(browserId, controller.signal);
 
-        if (stoppedPolling.has(key)) {
+        // 再次检查是否已被取消（防止在等待响应期间被取消）
+        if (controller.signal.aborted) {
           return;
         }
 
-        // 打印详细的API返回状态
+        // 打印详细的API返回状态 (V2 简化版)
         console.log(`[Polling] ${browserId} 状态:`, {
-          loginStatus: status.loginStatus || 'null',
-          wechatStatus: status.wechatStatus !== undefined ? status.wechatStatus : 'undefined',
           scanned: status.scanned,
-          success: status.success,
+          confirmed: status.confirmed,
           expired: status.expired,
+          success: status.success,
           nickname: status.nickname || '无',
           cookies: status.cookies ? `${status.cookies.length}个` : '无'
         });
 
         // 轮询只负责调用API，状态变化由Realtime推送
-        // 如果状态变为完成或过期，停止轮询
-        if (status.loginStatus === 'completed' || status.loginStatus === 'expired') {
-          console.log(`[Polling] 状态${status.loginStatus}，停止轮询: ${browserId}`);
+        // 如果状态变为完成或过期，停止轮询 (V2 使用布尔值判断)
+        if (status.confirmed || status.expired) {
+          console.log(`[Polling] 状态${status.confirmed ? '完成' : '过期'}，停止轮询: ${browserId}`);
           stopPolling(browserId);
         }
-      } catch (error) {
+      } catch (error: any) {
+        // 请求被取消（正常情况），静默处理
+        if (error.name === 'CanceledError' || error.name === 'AbortError') {
+          console.log(`[Polling] 请求已取消: ${browserId}`);
+          return;
+        }
         console.error(`[Polling] 检测失败: ${browserId}`, error);
       }
     }
 
+    // 立即执行第一次轮询
     pollStatus();
 
+    // 启动定时器
     const timer = setInterval(() => {
       pollStatus();
     }, POLL_INTERVAL);
@@ -403,14 +411,24 @@ export function useAddAccount() {
 
   /**
    * 停止轮询
+   * ✅ 同时取消所有飞行中的请求
    */
   function stopPolling(browserId: string) {
     const key = `polling_${browserId}`;
+
+    // 1. 取消所有飞行中的请求
+    const controller = pollingControllers.get(key);
+    if (controller) {
+      controller.abort();
+      pollingControllers.delete(key);
+      console.log(`[Polling] 已取消飞行中的请求: ${browserId}`);
+    }
+
+    // 2. 清除定时器
     const timer = pollingTimers.get(key);
     if (timer) {
       clearInterval(timer);
       pollingTimers.delete(key);
-      stoppedPolling.add(key);
       console.log(`[Polling] 停止轮询: ${browserId}`);
     }
   }
@@ -516,7 +534,7 @@ export function useAddAccount() {
       // 状态变化会通过 Realtime 推送到 handleRealtimePush 直接处理
       try {
         const status = await CloudService.checkLinkStatus(account.browserId);
-        console.log(`[链接上号] 初始状态查询: wechatStatus=${status.wechatStatus || 'unknown'}`);
+        console.log(`[链接上号] 初始状态查询: scanned=${status.scanned}, confirmed=${status.confirmed}`);
         // 状态已通过 checkLinkStatus 更新到数据库，Realtime 会自动推送到 handleRealtimePush
       } catch (error) {
         console.error(`[链接上号] 初始状态查询失败:`, error);
@@ -569,13 +587,18 @@ export function useAddAccount() {
     }
     processedBrowserIds.add(data.browserId);
 
+    // ✅ 立即更新状态并强制渲染 UI
     account.state = 'creating';
     account.progress = 70;
+    await nextTick();  // 强制立即更新 UI
+
+    // ✅ 保存 syncResult 到外层作用域，供后续使用
+    let syncResult: any = null;
 
     try {
       // 从云端同步最新的 Cookie 和账号信息
       console.log(`[登录完成] 从云端同步Cookie: ${data.browserId}`);
-      const syncResult = await CloudService.syncCookieFromCloud(data.browserId);
+      syncResult = await CloudService.syncCookieFromCloud(data.browserId);
 
       account.accountInfo = {
         nickname: syncResult.nickname || data.nickname || '未知用户',
@@ -603,9 +626,10 @@ export function useAddAccount() {
     try {
       const virtualBrowserId = account.browserId; // 保存虚拟ID
       let realBrowserId = virtualBrowserId;
+      const isVirtual = account.isVirtual; // ✅ 提前保存虚拟ID标记
 
       // 判断是否是扫码上号（虚拟ID）
-      if (account.isVirtual) {
+      if (isVirtual) {
         console.log(`[扫码上号] 检测到虚拟ID，创建真实浏览器: ${virtualBrowserId}`);
 
         // ✅ 先停止轮询，避免后续删除记录后轮询出现404
@@ -639,14 +663,15 @@ export function useAddAccount() {
         // 注意：订阅由 AccountMonitorService 统一管理，不在此处取消
         await CloudService.deletePermanentLink(virtualBrowserId);
 
-        // 使用 autoRegisterBrowser 创建完整记录（含Cookie）
+        // ✅ 使用 syncResult.cookies 而不是 data.cookies（更完整可靠）
+        const cookiesForRegister = syncResult?.cookies || data.cookies || [];
         const registerResult = await CloudService.autoRegisterBrowser(
           realBrowserId,
-          data.cookies,
+          cookiesForRegister,
           account.config.loginMethod,
           {
-            nickname: data.nickname,
-            avatar: data.avatar
+            nickname: account.accountInfo.nickname,
+            avatar: account.accountInfo.avatar
           }
         );
 
@@ -664,14 +689,16 @@ export function useAddAccount() {
           invoke('sync_cookie_to_browser', {
             browserId: realBrowserId,
             cookie: account.cookie,
-            nickname: data.nickname,
-            avatar: data.avatar
+            nickname: account.accountInfo.nickname,
+            avatar: account.accountInfo.avatar
           })
         );
       }
 
+      // ✅ 立即更新状态并强制渲染 UI
       account.state = 'success';
       account.progress = 100;
+      await nextTick();  // 强制立即更新 UI
 
       // 更新账号信息到本地
       const accountData: Cookie.AccountData = {
@@ -689,10 +716,12 @@ export function useAddAccount() {
       const browserStore = useBrowserStore();
       browserStore.updateAccountInfo(realBrowserId, account.accountInfo);
 
-      // 注册到账号监控服务（长期监控Cookie状态）
-      AccountMonitorService.subscribeNewAccount(realBrowserId, {
-        nickname: data.nickname
-      });
+      // 确保订阅真实ID（不会初始化pending缓存）
+      AccountMonitorService.ensureSubscribed(realBrowserId);
+
+      // ✅ 主动查询一次最新状态，填充缓存
+      // 如果虚拟ID的订阅还在，查询时会自动清理（404 → 取消订阅）
+      await AccountMonitorService.refreshAccountStatus(realBrowserId);
 
       // 停止轮询（使用虚拟ID，仅扫码上号）
       stopPolling(virtualBrowserId);
