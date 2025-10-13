@@ -132,7 +132,9 @@ export class RealtimePushService {
               cookieStatus: payload.new.cookie_status,
               nickname: payload.new.nickname,
               avatar: payload.new.avatar,
-              scanned: payload.new.cookie_status === 'checking',
+              // ✅ 修复：根据 cookie_status 正确映射扫码状态
+              // checking = 已扫码等待确认, online = 已确认登录, offline = 失效
+              scanned: payload.new.cookie_status === 'checking' || payload.new.cookie_status === 'online',
               confirmed: payload.new.cookie_status === 'online',
               expired: payload.new.cookie_status === 'offline'
             };
