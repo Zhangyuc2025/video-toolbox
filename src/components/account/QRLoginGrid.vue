@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted, watch } from 'vue';
-import { NGrid, NGridItem, NCard, NProgress, NButton, NTag, NEmpty, NImage, NSpin } from 'naive-ui';
+import { NGrid, NGridItem, NCard, NProgress, NButton, NTag, NEmpty, NSpin } from 'naive-ui';
 import type { AccountCreateItem, AccountCreateState } from '@/types/account';
 import { LoginMethod } from '@/types/account';
 
@@ -23,6 +23,9 @@ let timer: number | null = null;
 // 记录已过期的账号，避免重复触发
 const expiredAccounts = new Set<number>();
 
+// 记录二维码图片加载状态
+const qrImageLoading = ref<Record<number, boolean>>({});
+
 // 定时更新当前时间
 onMounted(() => {
   timer = window.setInterval(() => {
@@ -39,10 +42,11 @@ onUnmounted(() => {
   expiredAccounts.clear();
 });
 
-// 监听账号数组变化，清理不存在的过期记录
-watch(() => props.accounts, (newAccounts) => {
+// 监听账号数组变化，清理不存在的过期记录和管理加载状态
+watch(() => props.accounts, (newAccounts, oldAccounts) => {
   if (!newAccounts || newAccounts.length === 0) {
     expiredAccounts.clear();
+    qrImageLoading.value = {};
     return;
   }
 
@@ -55,7 +59,27 @@ watch(() => props.accounts, (newAccounts) => {
     }
   });
   toDelete.forEach(index => expiredAccounts.delete(index));
+
+  // 检测 qrUrl 变化，设置加载状态
+  newAccounts.forEach((account, idx) => {
+    const oldAccount = oldAccounts?.find(a => a.index === account.index);
+    if (account.qrUrl && account.qrUrl !== oldAccount?.qrUrl) {
+      // 新的二维码 URL，设置为加载中
+      qrImageLoading.value[account.index] = true;
+    }
+  });
 }, { deep: true });
+
+// 二维码图片加载完成
+function handleQRImageLoad(index: number) {
+  qrImageLoading.value[index] = false;
+}
+
+// 二维码图片加载失败
+function handleQRImageError(index: number) {
+  qrImageLoading.value[index] = false;
+  console.error(`二维码图片加载失败: 账号 #${index + 1}`);
+}
 
 // 检查是否有账号倒计时归零
 function checkExpiredAccounts() {
@@ -209,13 +233,15 @@ function getStateIcon(state: AccountCreateState) {
               <div class="qr-code-container">
                 <!-- 二维码图片 -->
                 <div class="qr-code-image">
-                  <NImage
+                  <img
                     v-if="account.qrUrl"
                     :src="account.qrUrl"
-                    :width="200"
-                    :height="200"
-                    object-fit="contain"
-                    :preview-disabled="true"
+                    @load="handleQRImageLoad(account.index)"
+                    @error="handleQRImageError(account.index)"
+                    width="200"
+                    height="200"
+                    style="object-fit: contain;"
+                    alt="二维码"
                   />
                   <!-- 无二维码时显示占位 -->
                   <div v-else class="qr-placeholder">
@@ -228,8 +254,14 @@ function getStateIcon(state: AccountCreateState) {
                   {{ getQRTipText(account.config.loginMethod) }}
                 </div>
 
-                <!-- 加载状态遮罩 -->
-                <div v-if="account.state === 'qr_ready'" class="qr-mask loading-mask">
+                <!-- 二维码图片加载中遮罩 -->
+                <div v-if="qrImageLoading[account.index]" class="qr-mask loading-mask">
+                  <NSpin size="large" />
+                  <p class="mask-text">加载二维码...</p>
+                </div>
+
+                <!-- 生成中状态遮罩 -->
+                <div v-else-if="account.state === 'qr_ready'" class="qr-mask loading-mask">
                   <NSpin size="large" />
                   <p class="mask-text">生成中...</p>
                 </div>
