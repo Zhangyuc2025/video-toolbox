@@ -1,7 +1,7 @@
 {
     "name":  "toolbox",
     "type":  "module",
-    "version":  "1.0.1",
+    "version":  "1.0.6",
     "description":  "视频号工具箱 - 基于 Tauri + Vue3 + NaiveUI 的桌面应用",
     "author":  {
                    "name":  "zhang"
