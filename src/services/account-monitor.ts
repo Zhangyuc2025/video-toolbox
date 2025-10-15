@@ -500,12 +500,13 @@ export class AccountMonitorService {
     const cached = cloudStatusCache.value[browserId];
 
     if (!cached) {
+      // ✅ 缓存未命中时触发后台刷新（不阻塞返回）
+      // 解决刚登录后立即访问时的时序问题（Realtime推送可能还没到达）
+      this.refreshAccountStatus(browserId).catch(err => {
+        console.error(`[账号监控] 后台刷新失败: ${browserId}`, err);
+      });
       return null;
     }
-
-    // ✅ 不再自动刷新过期缓存
-    // 理由：已有 Realtime 实时推送，无需主动查询
-    // 如需手动刷新，UI 层可以主动调用 refreshAccountStatus
 
     return cached;
   }

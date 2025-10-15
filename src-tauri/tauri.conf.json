@@ -50,7 +50,7 @@
 
                                                  ],
                                  "resources":  [
-
+                                                   "../resources/browser-extension"
                                                ]
                              },
                   "security":  {

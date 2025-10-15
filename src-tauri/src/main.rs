@@ -940,6 +940,7 @@ async fn create_browser_with_account(
     config: serde_json::Value,
     cookie: String,
     nickname: Option<String>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let client = create_http_client();
 
@@ -997,6 +998,8 @@ async fn create_browser_with_account(
         params["proxyMethod"] = serde_json::json!(2);
         params["proxyType"] = serde_json::json!("noproxy");
     }
+
+    // 注意：插件通过 open_browser 的 --load-extension 参数动态加载，无需在创建时配置
 
     let base_url = get_bb_api_url().await?;
     let response = client
@@ -1249,16 +1252,31 @@ async fn open_browser(
     args: Option<Vec<String>>,
     load_url: Option<String>,
     clear_cookies: Option<bool>,
+    app: tauri::AppHandle,
 ) -> Result<ApiResponse, String> {
     let base_url = get_bb_api_url().await?;
     let client = create_http_client();
 
     let mut payload = serde_json::json!({
-        "id": browser_id
+        "id": browser_id,
+        "loadExtensions": true  // 加载扩展中心已启用的扩展
     });
 
-    // 构建 args 数组：如果有 load_url，将其添加到 args 中
+    // 构建 args 数组：添加扩展路径 + 启动 URL
     let mut args_vec = args.unwrap_or(vec![]);
+
+    // 🎯 添加扩展加载参数（使用 --load-extension）
+    match get_plugin_path(app) {
+        Ok(plugin_path) => {
+            println!("[open_browser] 添加扩展加载参数: {}", plugin_path);
+            args_vec.push(format!("--load-extension={}", plugin_path));
+        }
+        Err(e) => {
+            println!("[open_browser] 获取插件路径失败: {}, 跳过扩展加载", e);
+        }
+    }
+
+    // 添加启动 URL
     if let Some(url) = load_url {
         println!("[open_browser] 添加启动URL到args: {}", url);
         args_vec.push(url);
@@ -1532,6 +1550,144 @@ async fn get_browser_cookies(browser_id: String) -> Result<ApiResponse, String> 
     })
 }
 
+// ==================== 插件管理命令 ====================
+
+// 获取插件路径
+#[tauri::command]
+fn get_plugin_path(app: tauri::AppHandle) -> Result<String, String> {
+    use std::path::PathBuf;
+
+    // 开发环境检测：如果 CARGO_TARGET_DIR 或其他开发环境变量存在
+    #[cfg(debug_assertions)]
+    {
+        // 开发环境：尝试从项目根目录获取
+        if let Ok(exe_dir) = std::env::current_exe() {
+            // 向上查找到 src-tauri 目录，然后定位 resources
+            if let Some(exe_parent) = exe_dir.parent() {
+                let project_plugin_path = exe_parent
+                    .parent()  // target/debug -> target
+                    .and_then(|p| p.parent())  // target -> src-tauri
+                    .and_then(|p| p.parent())  // src-tauri -> toolbox
+                    .map(|p| p.join("resources").join("browser-extension"));
+
+                if let Some(path) = project_plugin_path {
+                    if path.exists() {
+                        let path_str = path
+                            .to_str()
+                            .ok_or("路径包含无效字符")?
+                            .to_string();
+                        println!("[插件管理] 开发环境插件路径: {}", path_str);
+                        return Ok(path_str);
+                    }
+                }
+            }
+        }
+    }
+
+    // 生产环境或开发环境 fallback：使用 Tauri resource_dir
+    let resource_dir = app
+        .path_resolver()
+        .resource_dir()
+        .ok_or("无法获取资源目录")?;
+
+    // 拼接插件目录路径
+    let plugin_path: PathBuf = resource_dir.join("browser-extension");
+
+    // 转换为字符串
+    let path_str = plugin_path
+        .to_str()
+        .ok_or("路径包含无效字符")?
+        .to_string();
+
+    println!("[插件管理] 插件路径: {}", path_str);
+
+    Ok(path_str)
+}
+
+// 获取浏览器详情
+#[tauri::command]
+async fn get_browser_detail(browser_id: String) -> Result<ApiResponse, String> {
+    let base_url = get_bb_api_url().await?;
+    let client = create_http_client();
+
+    let response = client
+        .post(format!("{}/browser/detail", base_url))
+        .json(&serde_json::json!({
+            "id": browser_id
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("API调用失败: {}", e))?;
+
+    if !response.status().is_success() {
+        return Ok(ApiResponse {
+            success: false,
+            message: "获取浏览器详情失败".to_string(),
+            data: None,
+        });
+    }
+
+    let result: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("解析响应失败: {}", e))?;
+
+    Ok(ApiResponse {
+        success: result["success"].as_bool().unwrap_or(false),
+        message: result["msg"].as_str().unwrap_or("").to_string(),
+        data: result.get("data").cloned(),
+    })
+}
+
+// 更新浏览器配置
+#[tauri::command]
+async fn update_browser(browser_id: String, config: serde_json::Value) -> Result<ApiResponse, String> {
+    let base_url = get_bb_api_url().await?;
+    let client = create_http_client();
+
+    let mut update_params = config;
+    update_params["id"] = serde_json::json!(browser_id);
+
+    // 🔍 调试：打印发送的配置
+    println!("[update_browser] 发送的配置:");
+    println!("  browser_id: {}", browser_id);
+    println!("  extensions: {:?}", update_params.get("extensions"));
+
+    let response = client
+        .post(format!("{}/browser/update", base_url))
+        .json(&update_params)
+        .send()
+        .await
+        .map_err(|e| format!("API调用失败: {}", e))?;
+
+    if !response.status().is_success() {
+        return Ok(ApiResponse {
+            success: false,
+            message: "更新浏览器配置失败".to_string(),
+            data: None,
+        });
+    }
+
+    let result: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("解析响应失败: {}", e))?;
+
+    // 🔍 调试：打印返回结果
+    println!("[update_browser] BitBrowser 返回:");
+    println!("  success: {}", result["success"].as_bool().unwrap_or(false));
+    println!("  message: {}", result["msg"].as_str().unwrap_or(""));
+    if let Some(data) = result.get("data") {
+        println!("  data.extensions: {:?}", data.get("extensions"));
+    }
+
+    Ok(ApiResponse {
+        success: result["success"].as_bool().unwrap_or(false),
+        message: result["msg"].as_str().unwrap_or("").to_string(),
+        data: result.get("data").cloned(),
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         // 初始化应用状态
@@ -1595,6 +1751,10 @@ fn main() {
             delete_browser,
             get_browser_cookies,
             update_browser_name,
+            get_browser_detail,
+            update_browser,
+            // 插件管理命令
+            get_plugin_path,
             // 配置管理命令
             config_manager::config_get_string,
             config_manager::config_set_string,

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>视频号永久链接助手</title>
+  <style>
+    body {
+      width: 320px;
+      padding: 16px;
+      font-family: Arial, sans-serif;
+      margin: 0;
+    }
+
+    h3 {
+      margin: 0 0 16px 0;
+      font-size: 16px;
+      color: #333;
+    }
+
+    .status {
+      padding: 12px;
+      border-radius: 4px;
+      margin-bottom: 16px;
+      font-size: 14px;
+    }
+
+    .status.success {
+      background-color: #e8f5e9;
+      color: #2e7d32;
+      border: 1px solid #81c784;
+    }
+
+    .status.warning {
+      background-color: #fff3e0;
+      color: #ef6c00;
+      border: 1px solid #ffb74d;
+    }
+
+    .status.error {
+      background-color: #ffebee;
+      color: #c62828;
+      border: 1px solid #e57373;
+    }
+
+    .info {
+      margin-bottom: 16px;
+    }
+
+    .info-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #eee;
+      font-size: 13px;
+    }
+
+    .info-label {
+      color: #666;
+    }
+
+    .info-value {
+      color: #333;
+      font-weight: 500;
+      max-width: 180px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    button {
+      width: 100%;
+      padding: 10px;
+      background-color: #07c160;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      font-size: 14px;
+      cursor: pointer;
+      margin-bottom: 8px;
+    }
+
+    button:hover {
+      background-color: #06ad56;
+    }
+
+    button:disabled {
+      background-color: #ccc;
+      cursor: not-allowed;
+    }
+
+    .footer {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid #eee;
+      font-size: 12px;
+      color: #999;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <h3>🎬 视频号永久链接助手</h3>
+
+  <div id="status" class="status warning">
+    正在加载配置...
+  </div>
+
+  <div class="info">
+    <div class="info-item">
+      <span class="info-label">浏览器ID:</span>
+      <span class="info-value" id="browserId">未配置</span>
+    </div>
+    <div class="info-item">
+      <span class="info-label">插件状态:</span>
+      <span class="info-value" id="pluginStatus">未知</span>
+    </div>
+    <div class="info-item">
+      <span class="info-label">Cookie状态:</span>
+      <span class="info-value" id="cookieStatus">未检测</span>
+    </div>
+  </div>
+
+  <button id="checkBtn">检查Cookie状态</button>
+  <button id="uploadBtn" disabled>手动上传Cookie</button>
+
+  <div class="footer">
+    版本 1.0.0 | By 全域阁
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

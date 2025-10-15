@@ -12,6 +12,7 @@ import { CloudService } from '@/services/cloud';
 import { AccountMonitorService, accountMonitorState } from '@/services/account-monitor';
 import { AccountSyncService } from '@/services/account-sync';
 import { realtimePushService } from '@/services/realtime-push';
+import { PluginManagerService } from '@/services/plugin-manager';
 import type { ApiResponse, BrowserListResponse } from '@/types/browser';
 
 const router = useRouter();
@@ -118,10 +119,11 @@ const checkPrerequisites = async () => {
   }
 };
 
-// 自动发现未注册账号（使用统一的账号同步服务）
+// 自动发现未注册账号（只注册，不同步Cookie）
 const autoDiscoverAccounts = async () => {
   try {
-    // 自动应用用户筛选配置
+    // 注意：这里只是发现本地未注册的账号并注册到云端生成永久链接
+    // 不进行Cookie同步，Cookie同步在打开浏览器时按需进行
     const result = await AccountSyncService.fullSync({ autoApplyUserFilter: true });
 
     if (result.localToCloud > 0) {
@@ -131,7 +133,7 @@ const autoDiscoverAccounts = async () => {
 
     return result;
   } catch (error) {
-    console.error('[AccountList] 自动同步失败:', error);
+    console.error('[AccountList] 自动发现账号失败:', error);
   }
 };
 
@@ -186,9 +188,9 @@ const loadBrowserList = async (autoDiscover = true) => {
   }
 };
 
-// 打开浏览器（优化版：使用本地缓存 + 后台验证）
+// 打开浏览器（在线验证 + Cookie同步 + 启动）
 const handleOpenBrowser = async (browserId: string) => {
-  // ✅ 获取浏览器对象和账号信息（用于显示友好的提示）
+  // 获取浏览器对象和账号信息
   const browser = browserStore.getBrowser(browserId);
   const cloudStatus = AccountMonitorService.getAccountStatus(browserId);
   const localAccount = browserStore.getAccountInfo(browserId);
@@ -200,14 +202,47 @@ const handleOpenBrowser = async (browserId: string) => {
   const loadingMsg = message.loading(`正在打开 #${browserSeq} 账号 ${accountName}...`, { duration: 0 });
 
   try {
+    // 🔥 关键步骤1：打开前先从云端同步Cookie到BitBrowser
+    console.log(`[打开浏览器] 步骤1: 从云端同步Cookie到BitBrowser - ${browserId}`);
 
-    let loadUrl: string | undefined;
+    let syncResult;
+    try {
+      syncResult = await AccountSyncService.syncSingle(browserId, true);
 
-    // 检查本地缓存的登录方式
-    const loginMethod = cloudStatus?.accountInfo?.loginMethod || localAccount?.loginMethod;
+      if (!syncResult.success) {
+        message.destroyAll();
+        notification.error(`Cookie同步失败: ${syncResult.message}`, {
+          title: '启动失败',
+          duration: 5000
+        });
+        return;
+      }
+
+      // 如果云端Cookie掉线，不允许打开
+      if (syncResult.action === 'skip' && cloudStatus?.cookieStatus === 'offline') {
+        message.destroyAll();
+        notification.error(`账号已掉线: ${accountName}，请重新登录`, {
+          title: '启动失败',
+          duration: 5000
+        });
+        return;
+      }
+
+      console.log(`[打开浏览器] 步骤2: Cookie同步成功，准备打开浏览器 - ${browserId}`);
+    } catch (error) {
+      message.destroyAll();
+      console.error(`[打开浏览器] Cookie同步异常:`, error);
+      notification.error(`Cookie同步异常，无法打开浏览器`, {
+        title: '启动失败',
+        duration: 5000
+      });
+      return;
+    }
+
+    // 🔥 步骤2：从同步结果中获取最新的登录方式（使用云端最新数据，避免缓存错误）
+    const loginMethod = syncResult.accountInfo?.loginMethod || cloudStatus?.accountInfo?.loginMethod || localAccount?.loginMethod;
 
     if (!loginMethod) {
-      // 未找到账号信息，禁止启动
       message.destroyAll();
       notification.error('未找到该账号的登录信息，请确保账号已正确创建', {
         title: '启动失败',
@@ -216,27 +251,21 @@ const handleOpenBrowser = async (browserId: string) => {
       return;
     }
 
-    // 根据登录方式决定启动URL
+    // 根据登录方式决定启动URL，并添加插件模式参数（使用Hash避免重定向丢失）
+    // 同时传递 browser_id 和 owner 参数，供插件上传Cookie使用
+    const owner = browserStore.currentUserName || '';
+    let loadUrl: string | undefined;
     if (loginMethod === 'channels_helper') {
-      // 视频号助手
-      loadUrl = 'https://channels.weixin.qq.com/platform';
+      // 视频号登录 → 打开视频号视频管理页面，插件会跳转到带货助手
+      loadUrl = `https://channels.weixin.qq.com/platform/post/list#plugin_mode=channels&browser_id=${encodeURIComponent(browserId)}&owner=${encodeURIComponent(owner)}`;
     } else if (loginMethod === 'shop_helper') {
-      // 小店带货助手
-      loadUrl = 'https://store.weixin.qq.com/talent';
+      // 带货助手登录 → 打开带货助手订单页面，插件会跳转到视频号
+      loadUrl = `https://store.weixin.qq.com/talent/funds/order#plugin_mode=shop&browser_id=${encodeURIComponent(browserId)}&owner=${encodeURIComponent(owner)}`;
     }
 
-    // ✅ 优化2：使用本地缓存检查Cookie状态（瞬间完成）
-    if (cloudStatus?.cookieStatus === 'offline') {
-      // 账号已掉线（根据缓存状态）
-      message.destroyAll();
-      notification.error(`账号已掉线: ${accountName}，请重新登录`, {
-        title: '启动失败',
-        duration: 5000
-      });
-      return;
-    }
+    console.log(`[打开浏览器] 步骤3: 登录方式=${loginMethod}, 启动URL=${loadUrl}`);
 
-    // 立即打开浏览器（不等待云端验证）
+    // 打开浏览器
     const response = await invoke<ApiResponse>('open_browser', {
       browserId,
       args: [],
@@ -249,32 +278,7 @@ const handleOpenBrowser = async (browserId: string) => {
     if (response.success) {
       browserStore.updateBrowserRunningStatus(browserId, true);
       notification.success(`浏览器 #${browserSeq} 已成功打开`, {
-        meta: `账号: ${accountName} | Cookie失效会自动关闭`
-      });
-
-      // ✅ 优化3：打开成功后，后台验证Cookie状态（不阻塞用户）
-      CloudService.instantValidateCookie(browserId).then(validation => {
-        if (!validation) {
-          console.warn(`[后台验证] Cookie验证失败: ${browserId}`);
-          return;
-        }
-
-        if (!validation.valid) {
-          // Cookie实际已失效，但缓存未更新，立即通知用户
-          console.warn(`[后台验证] 检测到Cookie失效: ${browserId}`);
-          notification.warning(`账号 ${validation.nickname || browserId} 的Cookie已失效，请重新登录`, {
-            title: '账号状态变化',
-            duration: 8000
-          });
-
-          // 立即更新本地缓存状态，防止按钮继续可用
-          // 这会触发 Realtime 推送或直接更新缓存
-          AccountMonitorService.refreshAccountStatus(browserId);
-        } else {
-          console.log(`[后台验证] Cookie有效: ${browserId}`);
-        }
-      }).catch(error => {
-        console.error(`[后台验证] 验证出错: ${browserId}`, error);
+        meta: `账号: ${accountName}`
       });
     } else {
       notification.error(response.message || '打开浏览器失败');
@@ -418,6 +422,11 @@ onMounted(async () => {
 
     // 启动账号监控服务（Realtime 推送 + 云端状态同步）
     await AccountMonitorService.start();
+
+    // ✅ 插件加载策略（无需后台同步）
+    // 方案1：新浏览器创建时自动配置 extensions 字段（见 create_browser_with_account）
+    // 方案2：所有浏览器打开时通过 --load-extension 参数动态加载（见 open_browser）
+    // 结论：所有浏览器（包括已存在的）都会在打开时自动加载插件，无需后台同步配置
 
     // 加载账号信息（Cookie Store）
     await cookieStore.loadCookies();

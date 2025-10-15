@@ -59,6 +59,7 @@ export interface CloudPushData {
   lastValidTime?: string;      // 最后有效时间
   cookieUpdatedAt?: string;    // Cookie更新时间（扫码登录时间）
   cookieExpiredAt?: string;    // Cookie失效时间
+  shopToChannelsUpdatedAt?: number; // 跨平台Cookie更新时间（Unix秒）
 
   // ===== 错误计数 =====
   checkErrorCount?: number;

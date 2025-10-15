@@ -39,6 +39,80 @@ declare namespace Cookie {
     lastSyncTime?: number;
   }
 
+  /** 云端账号数据（包含拆分的Cookie字段） */
+  interface CloudAccountData {
+    /** 浏览器ID */
+    browser_id: string;
+    /** 登录方式 */
+    login_method: 'channels_helper' | 'shop_helper';
+    /** Cookie状态 */
+    cookie_status: 'pending' | 'online' | 'offline';
+
+    // 视频号Cookie字段
+    /** 视频号sessionid */
+    channels_sessionid?: string;
+    /** 视频号wxuin */
+    channels_wxuin?: string;
+    /** 视频号Cookie来源 */
+    channels_cookie_source?: 'login' | 'plugin_auto';
+    /** 视频号Cookie更新时间 */
+    channels_cookie_updated_at?: string;
+
+    // 小店助手Cookie字段
+    /** 小店助手talent_token */
+    shop_talent_token?: string;
+    /** 小店助手talent_rand */
+    shop_talent_rand?: string;
+    /** 小店助手talent_magic */
+    shop_talent_magic?: string;
+    /** 小店助手Cookie更新时间 */
+    shop_cookie_updated_at?: string;
+
+    // 账号信息
+    /** 昵称 */
+    nickname?: string;
+    /** 头像 */
+    avatar?: string;
+    /** 微信ID */
+    wechat_id?: string;
+    /** 视频号用户名 */
+    finder_username?: string;
+    /** 商家ID */
+    appuin?: string;
+    /** 店铺名称 */
+    shop_name?: string;
+    /** 账号信息JSON */
+    account_info?: string;
+
+    // 状态字段
+    /** 最后检测时间 */
+    last_check_time?: string;
+    /** 最后有效时间 */
+    last_valid_time?: string;
+    /** Cookie更新时间 */
+    cookie_updated_at?: string;
+    /** Cookie过期时间 */
+    cookie_expired_at?: string;
+    /** 连续检测失败次数 */
+    check_error_count?: number;
+
+    // 其他字段
+    /** 所有者 */
+    owner?: string;
+    /** 登录方式 */
+    login_way?: string;
+    /** 状态 */
+    status?: string;
+    /** 配置 */
+    config?: string;
+    /** 备注 */
+    remark?: string;
+    /** 创建时间 */
+    created_at?: string;
+    /** 更新时间 */
+    updated_at?: string;
+  }
+
   /** 云端Cookie状态缓存 */
   interface CloudStatusCache {
     /** Cookie状态 */

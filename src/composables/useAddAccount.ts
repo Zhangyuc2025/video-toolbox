@@ -729,6 +729,13 @@ export function useAddAccount() {
       // 单个账号创建成功，不显示通知（统一由 checkAllComplete 显示汇总通知）
       console.log(`[Realtime-全局] 账号 #${account.index + 1} 完成: ${data.nickname}`);
 
+      // ✅ 自动获取视频号Cookie（如果是带货助手登录）
+      const loginMethod = syncResult?.loginMethod || data.loginMethod || account.config.loginMethod;
+      if (loginMethod === 'shop_helper') {
+        console.log(`[自动获取CK] 检测到带货助手登录，启动自动获取视频号Cookie流程`);
+        autoFetchChannelsCookie(realBrowserId, account.accountInfo.nickname);
+      }
+
       // 检查是否所有账号都完成
       checkAllComplete();
     } catch (error) {
@@ -907,6 +914,114 @@ export function useAddAccount() {
       await generateSingleQRCode(index);
     } else {
       await generatePermanentLink(index);
+    }
+  }
+
+  /**
+   * 自动获取视频号Cookie（带货助手登录专用）
+   * 流程：
+   * 1. 打开浏览器（触发插件自动跳转到视频号）
+   * 2. 监听 shop_to_channels_updated_at 字段变化（Cookie上传完成）
+   * 3. Cookie上传成功后自动关闭浏览器
+   */
+  async function autoFetchChannelsCookie(browserId: string, nickname?: string) {
+    console.log(`[自动获取CK] 开始流程: ${browserId}`);
+
+    try {
+      // 1. 打开浏览器（会触发插件的自动跳转逻辑）
+      console.log(`[自动获取CK] 打开浏览器: ${browserId}`);
+      const owner = await configStore.get('bitbrowser.userName');
+
+      const openResult = await invoke<{ success: boolean; message?: string }>('open_browser', {
+        browserId,
+        args: [],
+        loadUrl: `https://store.weixin.qq.com/talent/funds/order#plugin_mode=shop&browser_id=${encodeURIComponent(browserId)}&owner=${encodeURIComponent(owner || '')}`,
+        clearCookies: false
+      });
+
+      if (!openResult.success) {
+        console.error(`[自动获取CK] 打开浏览器失败: ${openResult.message}`);
+        notification.error(`自动获取视频号Cookie失败: ${openResult.message}`);
+        return;
+      }
+
+      notification.info(`正在自动获取 ${nickname || browserId} 的视频号Cookie，请稍候...`);
+
+      // 2. 订阅 Realtime 推送，监听 shop_to_channels_updated_at 变化
+      let isCompleted = false;
+      const timeout = 90000; // 90秒超时
+      const startTime = Date.now();
+
+      // 用于存储 wrappedHandler 的引用
+      let unsubscribeHandler: ((data: CloudPushData) => Promise<void>) | null = null;
+
+      const handleCookieUpdate = async (data: CloudPushData) => {
+        if (data.browserId !== browserId || isCompleted) {
+          return;
+        }
+
+        // 检测到 shop_to_channels_updated_at 有值，说明Cookie已上传
+        if (data.shopToChannelsUpdatedAt && data.shopToChannelsUpdatedAt > 0) {
+          console.log(`[自动获取CK] 检测到视频号Cookie已上传: ${browserId}`);
+          isCompleted = true;
+
+          // 等待2秒确保插件完成所有操作
+          await new Promise(resolve => setTimeout(resolve, 2000));
+
+          // 3. 关闭浏览器
+          try {
+            await invoke('close_browser', { browserId });
+            console.log(`[自动获取CK] 浏览器已关闭: ${browserId}`);
+            notification.success(`成功获取 ${nickname || browserId} 的视频号Cookie`);
+          } catch (error) {
+            console.error(`[自动获取CK] 关闭浏览器失败:`, error);
+          }
+
+          // 取消订阅（清理资源）
+          if (unsubscribeHandler) {
+            AccountMonitorService.unsubscribe(browserId, unsubscribeHandler);
+          }
+        }
+      };
+
+      // 包装 handleCookieUpdate 以清理超时定时器
+      let timeoutTimer: NodeJS.Timeout | null = null;
+
+      const wrappedHandler = async (data: CloudPushData) => {
+        await handleCookieUpdate(data);
+        if (isCompleted && timeoutTimer) {
+          clearTimeout(timeoutTimer);
+          timeoutTimer = null;
+        }
+      };
+
+      // 保存 wrappedHandler 引用，供取消订阅使用
+      unsubscribeHandler = wrappedHandler;
+
+      // 确保订阅（添加回调监听）
+      AccountMonitorService.ensureSubscribed(browserId, wrappedHandler);
+
+      // 设置超时检查
+      timeoutTimer = setTimeout(async () => {
+        if (!isCompleted) {
+          console.warn(`[自动获取CK] 超时未完成: ${browserId}`);
+          notification.warning(`自动获取 ${nickname || browserId} 的视频号Cookie超时，请手动检查`);
+
+          // 取消订阅
+          AccountMonitorService.unsubscribe(browserId, wrappedHandler);
+
+          // 尝试关闭浏览器
+          try {
+            await invoke('close_browser', { browserId });
+          } catch (error) {
+            console.error(`[自动获取CK] 关闭浏览器失败:`, error);
+          }
+        }
+      }, timeout);
+
+    } catch (error) {
+      console.error(`[自动获取CK] 流程异常:`, error);
+      notification.error(`自动获取视频号Cookie失败: ${error}`);
     }
   }
 

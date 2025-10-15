@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "视频号永久链接助手",
+  "version": "1.0.0",
+  "description": "自动上传视频号Cookie到云端，支持小店助手转视频号Cookie",
+  "permissions": [
+    "cookies",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://channels.weixin.qq.com/*",
+    "https://channels.weixin.qq.com/platform/*",
+    "https://xms.weixin.qq.com/*",
+    "https://store.weixin.qq.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://channels.weixin.qq.com/*",
+        "https://xms.weixin.qq.com/*",
+        "https://store.weixin.qq.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

@@ -21,11 +21,7 @@ import { CloudService } from './cloud';
 import { configStore } from '@/utils/config-store';
 import { notification } from '@/utils';
 import { apiLimiter } from '@/utils/api-limiter';
-
-/**
- * Cookie类型
- */
-type CookieType = 'channels_helper' | 'shop_helper';
+import { assembleCookieString, parseCookies, detectLoginMethod } from './cookie-parser';
 
 /**
  * Cookie信息
@@ -64,44 +60,6 @@ export interface FullSyncResult {
     nickname: string;
     action: 'cloud_to_local' | 'local_to_cloud';
   }>;
-}
-
-/**
- * 识别Cookie类型
- */
-function detectCookieType(cookies: CookieInfo[]): CookieType {
-  if (!cookies || cookies.length === 0) {
-    return 'channels_helper';
-  }
-
-  const cookieNames = cookies.map(c => c.name);
-
-  // 带货助手：talent_token
-  if (cookieNames.includes('talent_token')) {
-    return 'shop_helper';
-  }
-
-  // 视频号助手：sessionid 或 wxuin
-  if (cookieNames.includes('sessionid') || cookieNames.includes('wxuin')) {
-    return 'channels_helper';
-  }
-
-  // 默认视频号助手
-  return 'channels_helper';
-}
-
-/**
- * 格式化Cookie为标准格式
- */
-function formatCookiesForCloud(cookies: CookieInfo[]): any[] {
-  return cookies.map(c => ({
-    name: c.name,
-    value: c.value,
-    domain: c.domain.startsWith('.') ? c.domain : `.${c.domain}`,
-    path: '/',
-    secure: true,
-    httpOnly: false
-  }));
 }
 
 /**
@@ -233,17 +191,19 @@ export class AccountSyncService {
     isRegistered: boolean
   ): Promise<SyncResult> {
     try {
-      // 1. cloudStatus 已经包含了账号信息，直接使用 syncCookieFromCloud API
+      // 1. 从云端获取Cookie（返回拆分后的字段）
       const syncResult = await CloudService.syncCookieFromCloud(browserId);
 
       if (!syncResult.cookies || syncResult.cookies.length === 0) {
         return { success: false, message: '云端Cookie为空' };
       }
 
-      // 2. 格式化Cookie字符串
+      // 2. 将Cookie数组转换为字符串格式（name=value; name=value）
       const cookie = syncResult.cookies
-        .map((c: any) => `${c.name}=${c.value}`)
+        .map(c => `${c.name}=${c.value}`)
         .join('; ');
+
+      console.log(`[云端→本地] Cookie字符串长度: ${cookie.length}, Cookie数量: ${syncResult.cookies.length}`);
 
       // 3. 同步到比特浏览器（只同步 Cookie，不更新名称）- 应用限流器
       await apiLimiter.runInternal(() =>
@@ -304,17 +264,17 @@ export class AccountSyncService {
     isUpdate: boolean
   ): Promise<SyncResult> {
     try {
-      // 1. 识别Cookie类型
-      const cookieType = detectCookieType(localCookies);
+      // 1. 解析Cookie为拆分字段
+      const parsed = parseCookies(localCookies);
 
-      // 2. 格式化Cookie
-      const formattedCookies = formatCookiesForCloud(localCookies);
+      // 2. 识别登录方式
+      const loginMethod = detectLoginMethod(parsed);
 
       // 3. 调用云端自动注册API（原子化操作：验证+注册）
       const registerResult = await CloudService.autoRegisterBrowser(
         browserId,
-        formattedCookies,
-        cookieType,
+        parsed, // 传递拆分后的字段对象
+        loginMethod,
         undefined // accountInfo由云端验证后自动获取
       );
 

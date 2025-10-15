@@ -142,10 +142,9 @@ export class PushDataHandler {
    *
    * 副作用类型：
    * 1. 更新浏览器名称（nickname变化时）
-   * 2. 同步Cookie到BitBrowser（收到cookies时）
-   * 3. 恢复Cookie（offline → online时）
-   * 4. 关闭浏览器（online → offline时）
-   * 5. 添加到通知队列（online → offline时）
+   * 2. 恢复Cookie（offline → online时）
+   * 3. 关闭浏览器（online → offline时）
+   * 4. 添加到通知队列（online → offline时）
    */
   private static async executeSideEffects(
     data: CloudPushData,
@@ -177,28 +176,7 @@ export class PushDataHandler {
       }
     }
 
-    // 副作用2: 同步Cookie到BitBrowser（如果云端推送了cookies）
-    if (data.cookies && Array.isArray(data.cookies) && data.cookies.length > 0) {
-      try {
-        const cookie = data.cookies
-          .map(c => `${c.name}=${c.value}`)
-          .join('; ');
-
-        await apiLimiter.runInternal(() =>
-          invoke('sync_cookie_to_browser', {
-            browserId,
-            cookie
-          })
-        );
-        console.log(`[推送处理] ✅ Cookie已同步到BitBrowser: ${browserId}`);
-        sideEffects.cookieSynced = true;
-      } catch (error) {
-        console.error(`[推送处理] Cookie同步失败: ${browserId}`, error);
-        sideEffects.cookieSynced = false;
-      }
-    }
-
-    // 副作用3: 状态恢复（offline/pending → online）
+    // 副作用2: 状态恢复（offline/pending → online）
     if (normalized.cookieStatus === 'online' && oldStatus !== 'online') {
       console.log(`[推送处理] 检测到账号恢复: ${newNickname || browserId} (${oldStatus} → online)`);
 
@@ -210,12 +188,12 @@ export class PushDataHandler {
       sideEffects.accountRecovered = true;
     }
 
-    // 副作用4: 状态掉线（online → offline）
+    // 副作用3: 状态掉线（online → offline）
     if (normalized.cookieStatus === 'offline' && oldStatus === 'online') {
       const nickname = newNickname || browserId;
       console.log(`[推送处理] 检测到账号掉线: ${nickname} (${browserId})`);
 
-      // 4.1 自动关闭浏览器
+      // 3.1 自动关闭浏览器
       try {
         await invoke('close_browser', { browserId });
         console.log(`[推送处理] ✅ 已自动关闭浏览器: ${nickname}`);
@@ -230,7 +208,7 @@ export class PushDataHandler {
         sideEffects.browserClosed = false;
       }
 
-      // 4.2 添加到通知缓冲区（由调用方统一发送，防抖）
+      // 3.2 添加到通知缓冲区（由调用方统一发送，防抖）
       if (!expiredBuffer.includes(nickname)) {
         expiredBuffer.push(nickname);
       }
