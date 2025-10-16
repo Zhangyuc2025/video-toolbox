@@ -1590,8 +1590,8 @@ fn get_plugin_path(app: tauri::AppHandle) -> Result<String, String> {
         .resource_dir()
         .ok_or("无法获取资源目录")?;
 
-    // 拼接插件目录路径
-    let plugin_path: PathBuf = resource_dir.join("browser-extension");
+    // 拼接插件目录路径（注意：Tauri会将 ../resources/browser-extension 打包到 {resource_dir}/resources/browser-extension）
+    let plugin_path: PathBuf = resource_dir.join("resources").join("browser-extension");
 
     // 转换为字符串
     let path_str = plugin_path
