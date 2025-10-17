@@ -13,6 +13,7 @@ import { AccountMonitorService, accountMonitorState } from '@/services/account-m
 import { AccountSyncService } from '@/services/account-sync';
 import { realtimePushService } from '@/services/realtime-push';
 import { PluginManagerService } from '@/services/plugin-manager';
+import { autoFetchChannelsCookie } from '@/services/channels-cookie-fetcher';
 import type { ApiResponse, BrowserListResponse } from '@/types/browser';
 
 const router = useRouter();
@@ -239,8 +240,8 @@ const handleOpenBrowser = async (browserId: string) => {
       return;
     }
 
-    // 🔥 步骤2：从同步结果中获取最新的登录方式（使用云端最新数据，避免缓存错误）
-    const loginMethod = syncResult.accountInfo?.loginMethod || cloudStatus?.accountInfo?.loginMethod || localAccount?.loginMethod;
+    // 🔥 步骤2.1：从同步结果中获取最新的登录方式（使用云端最新数据，避免缓存错误）
+    const loginMethod = syncResult.accountInfo?.loginMethod || cloudStatus?.accountInfo?.loginMethod;
 
     if (!loginMethod) {
       message.destroyAll();
@@ -251,8 +252,69 @@ const handleOpenBrowser = async (browserId: string) => {
       return;
     }
 
+    console.log(`[打开浏览器] 步骤2.1: 账号登录方式 = ${loginMethod}`);
+
+    // 🔥 步骤2.2：使用云端智能验证（已自动处理 channels 和 shop helper 两种Cookie）
+    console.log(`[打开浏览器] 步骤2.2: 调用云端智能验证 - ${browserId} (${loginMethod})`);
+
+    try {
+      const validationResult = await CloudService.instantValidateCookie(browserId);
+
+      if (!validationResult) {
+        message.destroyAll();
+        notification.error(`Cookie验证失败：无法连接到验证服务`, {
+          title: '启动失败',
+          duration: 5000
+        });
+        return;
+      }
+
+      if (!validationResult.valid) {
+        // Cookie已失效，拒绝打开
+        message.destroyAll();
+        notification.error(`Cookie已失效，无法打开浏览器`, {
+          title: '启动失败',
+          meta: `原因: ${validationResult.error || '未知'}`,
+          duration: 5000
+        });
+        console.error(`[打开浏览器] Cookie验证失败，拒绝打开: ${browserId}`, validationResult.error);
+        await AccountMonitorService.refreshAccountStatus(browserId);
+        return;
+      }
+
+      // ✅ Cookie有效，允许打开
+      console.log(`[打开浏览器] Cookie验证通过 - ${browserId}`);
+      await AccountMonitorService.refreshAccountStatus(browserId);
+
+      // ⚠️ 对于带货助手账号，检查是否需要重新获取视频号Cookie
+      if (loginMethod === 'shop_helper' && validationResult.needRefetchChannelsCookie) {
+        console.log(`[打开浏览器] ⚠️ 云端检测到需要重新获取视频号Cookie - ${browserId}`);
+        notification.info(`带货助手Cookie正常，打开后将自动获取视频号Cookie`, {
+          title: `#${browserSeq} ${accountName}`,
+          duration: 3000
+        });
+
+        // 稍后自动获取视频号Cookie
+        setTimeout(() => {
+          autoFetchChannelsCookie({
+            browserId,
+            nickname: accountName,
+            skipOpen: true
+          });
+        }, 2000);
+      }
+    } catch (error) {
+      message.destroyAll();
+      console.error(`[打开浏览器] Cookie验证异常:`, error);
+      notification.error(`Cookie验证异常: ${error}`, {
+        title: '启动失败',
+        duration: 5000
+      });
+      return;
+    }
+
     // 根据登录方式决定启动URL，并添加插件模式参数（使用Hash避免重定向丢失）
-    // 同时传递 browser_id 和 owner 参数，供插件上传Cookie使用
+    // 同时传递 browser_id、owner 和 channels_jump_url 参数，供插件使用
     const owner = browserStore.currentUserName || '';
     let loadUrl: string | undefined;
     if (loginMethod === 'channels_helper') {
@@ -260,7 +322,19 @@ const handleOpenBrowser = async (browserId: string) => {
       loadUrl = `https://channels.weixin.qq.com/platform/post/list#plugin_mode=channels&browser_id=${encodeURIComponent(browserId)}&owner=${encodeURIComponent(owner)}`;
     } else if (loginMethod === 'shop_helper') {
       // 带货助手登录 → 打开带货助手订单页面，插件会跳转到视频号
-      loadUrl = `https://store.weixin.qq.com/talent/funds/order#plugin_mode=shop&browser_id=${encodeURIComponent(browserId)}&owner=${encodeURIComponent(owner)}`;
+      // ✅ 直接从云端API获取最新的跳转链接（避免缓存不一致问题）
+      let channelsJumpUrl = '';
+      try {
+        console.log(`[打开浏览器] 从云端获取跳转链接: ${browserId}`);
+        const accountStatus = await CloudService.checkAccountStatus(browserId);
+        channelsJumpUrl = accountStatus?.channelsJumpUrl || '';
+        console.log(`[打开浏览器] 跳转链接获取结果: ${channelsJumpUrl ? '有缓存' : '无缓存（将调用API生成）'}`);
+      } catch (error) {
+        console.error(`[打开浏览器] 获取跳转链接失败:`, error);
+      }
+
+      const jumpUrlParam = channelsJumpUrl ? `&channels_jump_url=${encodeURIComponent(channelsJumpUrl)}` : '';
+      loadUrl = `https://store.weixin.qq.com/talent/funds/order#plugin_mode=shop&browser_id=${encodeURIComponent(browserId)}&owner=${encodeURIComponent(owner)}${jumpUrlParam}`;
     }
 
     console.log(`[打开浏览器] 步骤3: 登录方式=${loginMethod}, 启动URL=${loadUrl}`);
@@ -376,22 +450,48 @@ const handleDeleteBrowser = async (browserId: string) => {
   });
 };
 
-// 检测Cookie
+// 检测Cookie有效性
 const handleCheckCookie = async (browserId: string) => {
+  // 获取账号信息
+  const browser = browserStore.getBrowser(browserId);
+  const cloudStatus = AccountMonitorService.getAccountStatus(browserId);
+  const accountName = cloudStatus?.accountInfo?.nickname || browser?.name || browserId;
+  const browserSeq = browser?.seq || '?';
+
   try {
     browserStore.setCookieChecking(browserId, true);
-    notification.info('Cookie检测功能待实现...');
+    message.info(`正在检测 #${browserSeq} 账号 ${accountName} 的Cookie有效性...`);
 
-    // TODO: 实现Cookie检测逻辑
-    // 这里需要调用视频号API检测Cookie有效性
+    // 调用云端即时验证接口
+    const result = await CloudService.instantValidateCookie(browserId);
 
-    // 模拟检测延迟
-    setTimeout(() => {
-      browserStore.setCookieChecking(browserId, false);
-    }, 2000);
+    if (!result) {
+      notification.error('Cookie检测失败：无法连接到验证服务', {
+        title: `检测失败 - #${browserSeq} ${accountName}`
+      });
+      return;
+    }
+
+    if (result.valid) {
+      notification.success(`Cookie有效，账号在线`, {
+        title: `检测成功 - #${browserSeq} ${accountName}`,
+        meta: result.nickname || accountName
+      });
+    } else {
+      notification.error(`Cookie已失效：${result.error || '未知原因'}`, {
+        title: `检测失败 - #${browserSeq} ${accountName}`,
+        duration: 8000
+      });
+    }
+
+    // 刷新账号状态
+    await AccountMonitorService.refreshAccountStatus(browserId);
   } catch (error) {
     console.error('检测Cookie失败:', error);
-    notification.error(`检测失败: ${error}`);
+    notification.error(`检测异常: ${error}`, {
+      title: `检测失败 - #${browserSeq} ${accountName}`
+    });
+  } finally {
     browserStore.setCookieChecking(browserId, false);
   }
 };

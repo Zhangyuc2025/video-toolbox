@@ -33,25 +33,14 @@ const cloudCookieStatus = computed(() => {
   return AccountMonitorService.getAccountStatus(props.browser.id);
 });
 
-// 计算账号信息（优先云端 Realtime 数据）
+// 计算账号信息（只从云端 Realtime 数据获取）
 const accountInfo = computed(() => {
-  // 优先：云端 Realtime 数据
   const cloudStatus = cloudCookieStatus.value;
   if (cloudStatus?.accountInfo) {
     return {
       nickname: cloudStatus.accountInfo.nickname,
       headImgUrl: cloudStatus.accountInfo.avatar || '',
       accountState: 0 // 云端暂无此字段，默认正常
-    };
-  }
-
-  // 后备：本地数据
-  const localInfo = browserStore.getAccountInfo(props.browser.id);
-  if (localInfo) {
-    return {
-      nickname: localInfo.nickname,
-      headImgUrl: (localInfo as any).avatar || localInfo.headImgUrl || '',
-      accountState: localInfo.accountState || 0
     };
   }
 
@@ -143,17 +132,10 @@ const proxyShort = computed(() => {
   return proxyType.toUpperCase();
 });
 
-// 计算登录方式（优先云端 Realtime 数据）
+// 计算登录方式（只从云端 Realtime 数据获取）
 const loginMethod = computed(() => {
-  // 优先：云端 Realtime 数据
   const cloudStatus = cloudCookieStatus.value;
-  if (cloudStatus?.accountInfo?.loginMethod) {
-    return cloudStatus.accountInfo.loginMethod;
-  }
-
-  // 后备：本地数据
-  const localInfo = browserStore.getAccountInfo(props.browser.id);
-  return localInfo?.loginMethod || null;
+  return cloudStatus?.accountInfo?.loginMethod || null;
 });
 
 // 格式化登录方式文本

@@ -177,7 +177,7 @@ async function getFinderUsername() {
 }
 
 /**
- * 带货助手 → 视频号跳转
+ * 带货助手 → 视频号跳转（支持使用缓存的跳转链接）
  */
 async function jumpFromShopToChannels() {
   console.log('[跳转] 开始执行：带货助手 → 视频号');
@@ -195,73 +195,116 @@ async function jumpFromShopToChannels() {
     console.log('[跳转] 等待2秒，确保页面稳定...');
     await new Promise(resolve => setTimeout(resolve, 2000));
 
-    // 0. 从当前页面URL Hash中获取browser_id和owner，传递到跳转后的页面
+    // 0. 从当前页面URL Hash中获取参数
     const hash = window.location.hash.substring(1);
     const params = new URLSearchParams(hash);
     const browserId = params.get('browser_id') || '';
     const owner = params.get('owner') || '';
+    const cachedJumpUrl = params.get('channels_jump_url');
 
-    // 1. 获取finderUsername
-    console.log('[跳转] 获取finderUsername...');
-    const finderUsername = await getFinderUsername();
+    let targetUrl;
 
-    if (!finderUsername) {
-      console.error('[跳转] 无法获取finderUsername，取消跳转');
-      return;
-    }
+    // ✅ 优先使用缓存的跳转链接（避免频繁调用API导致Cookie失效）
+    if (cachedJumpUrl) {
+      console.log('[跳转] 检测到缓存的跳转链接，直接使用');
+      targetUrl = decodeURIComponent(cachedJumpUrl);
+      console.log('[跳转] 缓存的跳转URL:', targetUrl);
+    } else {
+      // 没有缓存的跳转链接，调用API生成新的
+      console.log('[跳转] 未找到缓存的跳转链接，调用API生成新的');
 
-    // 2. 获取talent_magic
-    const talentMagic = getTalentMagic();
-    if (!talentMagic) {
-      console.error('[跳转] 未找到talent_magic Cookie，取消跳转');
-      return;
-    }
+      // 1. 获取finderUsername
+      console.log('[跳转] 获取finderUsername...');
+      const finderUsername = await getFinderUsername();
 
-    // 3. 调用跳转API
-    console.log('[跳转] 调用genSkipFinderPlatformCode API');
+      if (!finderUsername) {
+        console.error('[跳转] 无法获取finderUsername，取消跳转');
+        return;
+      }
 
-    const apiUrl = `https://store.weixin.qq.com/shop-faas/mmeckolbasenode/base/genSkipFinderPlatformCode?token=&lang=zh_CN&toFinderusername=${encodeURIComponent(finderUsername)}`;
+      // 2. 获取talent_magic
+      const talentMagic = getTalentMagic();
+      if (!talentMagic) {
+        console.error('[跳转] 未找到talent_magic Cookie，取消跳转');
+        return;
+      }
 
-    const response = await fetch(apiUrl, {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json, text/plain, */*',
-        'talent_magic': talentMagic
-      },
-      credentials: 'include'
-    });
+      // 3. 调用跳转API
+      console.log('[跳转] 调用genSkipFinderPlatformCode API');
 
-    const data = await response.json();
+      const apiUrl = `https://store.weixin.qq.com/shop-faas/mmeckolbasenode/base/genSkipFinderPlatformCode?token=&lang=zh_CN&toFinderusername=${encodeURIComponent(finderUsername)}`;
 
-    console.log('[跳转] API响应:', data);
+      const response = await fetch(apiUrl, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+          'talent_magic': talentMagic
+        },
+        credentials: 'include'
+      });
 
-    if (data.ret === 0 && data.code) {
+      const data = await response.json();
+
+      console.log('[跳转] API响应:', data);
+
+      if (data.ret !== 0 || !data.code) {
+        console.error('[跳转] API返回失败:', data);
+        return;
+      }
+
       // 4. 构建跳转URL（直接跳转到视频管理页面，并传递browser_id和owner参数）
       // 使用 Hash 而不是查询参数，避免重定向时丢失
-      const targetUrl = `https://channels.weixin.qq.com/platform/post/list?external_token=${encodeURIComponent(data.code)}&external_scene=8&external_type=8#browser_id=${encodeURIComponent(browserId)}&owner=${encodeURIComponent(owner)}`;
+      targetUrl = `https://channels.weixin.qq.com/platform/post/list?external_token=${encodeURIComponent(data.code)}&external_scene=8&external_type=8#browser_id=${encodeURIComponent(browserId)}&owner=${encodeURIComponent(owner)}`;
 
-      console.log('[跳转] 准备跳转到:', targetUrl);
+      console.log('[跳转] 新生成的跳转URL:', targetUrl);
 
-      // 5. 在新标签页打开
-      window.open(targetUrl, '_blank');
+      // ✅ 将新生成的跳转链接上传到数据库（供下次使用）
+      try {
+        const supabaseUrl = 'https://jsfjdcbfftuaynwkmjey.supabase.co';
+        const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpzZmpkY2JmZnR1YXlud2ttamV5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjAwODI2NDUsImV4cCI6MjA3NTY1ODY0NX0.7SBL2PTnEuCE3sfEHby9jy6N75wjtVxGCtO7zUvN6cg';
 
-      console.log('[跳转] 已在新标签页打开视频号视频管理页面');
+        console.log('[跳转] 上传跳转链接到数据库');
 
-      // 6. 移除当前页面的 plugin_mode 参数，防止刷新后重复跳转
-      const currentHash = window.location.hash.substring(1);
-      const currentParams = new URLSearchParams(currentHash);
-      currentParams.delete('plugin_mode');
-      const newHash = currentParams.toString();
-      if (newHash) {
-        window.location.hash = newHash;
-      } else {
-        // 如果没有其他参数了，清空 hash
-        history.replaceState(null, '', window.location.pathname + window.location.search);
+        const uploadResponse = await fetch(`${supabaseUrl}/rest/v1/permanent_links?browser_id=eq.${browserId}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            'apikey': supabaseKey,
+            'Authorization': `Bearer ${supabaseKey}`,
+            'Prefer': 'return=minimal'
+          },
+          body: JSON.stringify({
+            channels_jump_url: targetUrl
+          })
+        });
+
+        if (!uploadResponse.ok) {
+          console.error('[跳转] 上传跳转链接失败:', uploadResponse.status);
+        } else {
+          console.log('[跳转] 跳转链接已缓存到数据库');
+        }
+      } catch (error) {
+        console.error('[跳转] 上传跳转链接异常:', error);
       }
-      console.log('[跳转] 已清除plugin_mode参数，防止刷新后重复跳转');
-    } else {
-      console.error('[跳转] API返回失败:', data);
     }
+
+    // 5. 在新标签页打开
+    console.log('[跳转] 准备跳转到:', targetUrl);
+    window.open(targetUrl, '_blank');
+    console.log('[跳转] 已在新标签页打开视频号视频管理页面');
+
+    // 6. 移除当前页面的 plugin_mode 参数，防止刷新后重复跳转
+    const currentHash = window.location.hash.substring(1);
+    const currentParams = new URLSearchParams(currentHash);
+    currentParams.delete('plugin_mode');
+    const newHash = currentParams.toString();
+    if (newHash) {
+      window.location.hash = newHash;
+    } else {
+      // 如果没有其他参数了，清空 hash
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+    console.log('[跳转] 已清除plugin_mode参数，防止刷新后重复跳转');
   } catch (error) {
     console.error('[跳转] 跳转失败:', error);
   }
@@ -391,13 +434,13 @@ async function jumpFromChannelsToShop() {
 
 /**
  * 从URL Hash获取所有参数
- * @returns { pluginMode, browserId, owner }
+ * @returns { pluginMode, browserId, owner, channelsJumpUrl }
  */
 function getHashParams() {
   const hash = window.location.hash;
 
   if (!hash) {
-    return { pluginMode: null, browserId: null, owner: null };
+    return { pluginMode: null, browserId: null, owner: null, channelsJumpUrl: null };
   }
 
   // 移除开头的 #
@@ -409,7 +452,8 @@ function getHashParams() {
   return {
     pluginMode: params.get('plugin_mode'),
     browserId: params.get('browser_id'),
-    owner: params.get('owner')
+    owner: params.get('owner'),
+    channelsJumpUrl: params.get('channels_jump_url')  // ✅ 获取缓存的跳转链接
   };
 }
 
@@ -519,7 +563,8 @@ async function extractAndUploadChannelsCookie() {
       const supabaseUrl = 'https://jsfjdcbfftuaynwkmjey.supabase.co';
       const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpzZmpkY2JmZnR1YXlud2ttamV5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjAwODI2NDUsImV4cCI6MjA3NTY1ODY0NX0.7SBL2PTnEuCE3sfEHby9jy6N75wjtVxGCtO7zUvN6cg';
 
-      const now = Math.floor(Date.now() / 1000);
+      // ✅ 使用 ISO 字符串格式（数据库字段类型为 TIMESTAMPTZ）
+      const now = new Date().toISOString();
 
       console.log('[Cookie提取] 更新数据库字段');
 
@@ -532,9 +577,10 @@ async function extractAndUploadChannelsCookie() {
           'Prefer': 'return=minimal'
         },
         body: JSON.stringify({
-          shop_to_channels_sessionid: sessionid,
-          shop_to_channels_wxuin: wxuin,
-          shop_to_channels_updated_at: now
+          channels_sessionid: sessionid,
+          channels_wxuin: wxuin,
+          cookie_updated_at: now,
+          cookie_status: 'online'
         })
       });
 

@@ -23,20 +23,26 @@ declare namespace Cookie {
     sameSite?: 'Strict' | 'Lax' | 'None';
   }
 
-  /** 账号数据（简化版，不存储Cookie） */
+  /**
+   * 账号数据（简化版，只存储不变的基本信息）
+   *
+   * 设计原则：
+   * - ✅ 只缓存不常变动的基本信息：nickname, avatar, finderUsername 等
+   * - ❌ 不缓存动态状态，实时从云端获取：loginMethod, cookieStatus 等
+   */
   interface AccountData {
-    /** 账号信息 */
-    accountInfo: AccountInfo;
-    /** 登录方式 */
-    loginMethod: 'channels_helper' | 'shop_helper';
-    /** 登录时间戳 */
-    loginTime: number;
-    /** 更新时间 */
-    updatedAt: string;
     /** 浏览器ID（必须，用于关联云端账号） */
     browserId: string;
-    /** 最后同步时间（用于判断缓存是否过期） */
-    lastSyncTime?: number;
+    /** 账号信息（基本信息，不常变动） */
+    accountInfo: AccountInfo;
+    /** 更新时间 */
+    updatedAt: string;
+
+    // ✅ 以下动态数据不再本地缓存，实时从云端 Realtime 获取：
+    // - loginMethod: 从 AccountMonitorService.getAccountStatus().accountInfo.loginMethod 获取
+    // - cookieStatus: 从 Realtime 推送获取
+    // - loginTime: 从云端获取
+    // - lastSyncTime: 从云端获取
   }
 
   /** 云端账号数据（包含拆分的Cookie字段） */
@@ -135,6 +141,8 @@ declare namespace Cookie {
       avatar: string;
       loginMethod: string;
     } | null;
+    /** 视频号跳转链接缓存（与视频号Cookie绑定，Cookie失效时一起清空） */
+    channelsJumpUrl?: string | null;
   }
 
   /** 账号信息 */

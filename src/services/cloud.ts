@@ -72,6 +72,7 @@ export interface AccountCookieStatus {
   cookieUpdatedAt: string | null;  // Cookie获取时间
   cookieExpiredAt: string | null;  // Cookie失效时间
   checkErrorCount: number;
+  channelsJumpUrl?: string | null;  // ✅ 视频号跳转链接缓存
   accountInfo: {
     nickname: string;
     avatar: string;
@@ -445,6 +446,7 @@ export class CloudService {
     nickname?: string;
     avatar?: string;
     error?: string;
+    needRefetchChannelsCookie?: boolean;  // ✅ 带货助手账号特有：需要重新获取视频号Cookie
   } | null> {
     try {
       console.log('[CloudService] 即时验证Cookie:', browserId);
@@ -464,14 +466,15 @@ export class CloudService {
       }
 
       const data = response.data.data;
-      console.log(`[CloudService] 验证结果: ${data.valid ? '有效' : '失效'}`);
+      console.log(`[CloudService] 验证结果: ${data.valid ? '有效' : '失效'}${data.needRefetchChannelsCookie ? ' (需要重新获取视频号Cookie)' : ''}`);
 
       return {
         valid: data.valid,
         cookieStatus: data.cookieStatus,
         nickname: data.nickname,
         avatar: data.avatar,
-        error: data.error
+        error: data.error,
+        needRefetchChannelsCookie: data.needRefetchChannelsCookie  // ✅ 传递云端返回的标志
       };
     } catch (error: any) {
       console.error('[CloudService] 即时验证失败:', error);

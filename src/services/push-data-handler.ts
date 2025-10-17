@@ -129,6 +129,9 @@ export class PushDataHandler {
       // 错误计数
       checkErrorCount: data.checkErrorCount ?? oldCache?.checkErrorCount ?? 0,
 
+      // ✅ 跳转链接缓存（带货助手账号专用）
+      channelsJumpUrl: data.channelsJumpUrl || oldCache?.channelsJumpUrl || null,
+
       // 缓存时间
       cachedAt: now,
 

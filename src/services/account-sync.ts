@@ -80,12 +80,13 @@ export class AccountSyncService {
    * | 无        | 有      | 有        | 云端→本地           |
    * | 有        | 无      | -         | 本地→云端（注册）     |
    * | 有        | 有      | 无        | 本地→云端（更新）     |
-   * | 有        | 有      | 有        | 对比时间戳，更新旧的  |
+   * | 有        | 有      | 有        | 对比内容，更新不同的  |
    *
    * @param browserId 浏览器ID
-   * @param force 强制同步（忽略时间戳对比）
+   * @param force 强制同步（忽略内容对比，直接同步）
+   * @param skipComparison 跳过内容对比（启动时使用，避免不必要的API请求）
    */
-  static async syncSingle(browserId: string, force: boolean = false): Promise<SyncResult> {
+  static async syncSingle(browserId: string, force: boolean = false, skipComparison: boolean = false): Promise<SyncResult> {
     try {
       // 1. 获取本地注册状态
       const registeredAccounts = await configStore.getBrowserAccounts();
@@ -116,6 +117,9 @@ export class AccountSyncService {
       const hasCloudCookie = cloudStatus?.cookieStatus === 'online' ||
                             (cloudStatus?.accountInfo?.nickname && cloudStatus?.accountInfo?.loginMethod);
 
+      // 🔍 调试日志：显示判断条件
+      console.log(`[账号同步] ${browserId} - 本地Cookie: ${hasLocalCookie ? localCookies.length + '个' : '无'}, 云端记录: ${hasCloudRecord ? '有' : '无'}, 云端Cookie: ${hasCloudCookie ? '有' : '无'}, 云端状态: ${cloudStatus?.cookieStatus || 'unknown'}`);
+
       // 4. 状态矩阵判断
 
       // 场景1: 本地无Cookie + 云端无记录 → 自动注册到云端（生成永久链接）
@@ -138,39 +142,74 @@ export class AccountSyncService {
 
       // 场景3: 本地无Cookie + 云端有Cookie → 云端→本地
       if (!hasLocalCookie && hasCloudRecord && hasCloudCookie) {
+        console.log(`[账号同步] 场景3: 本地无Cookie，从云端同步 - ${browserId}`);
         return await this.syncFromCloudToLocal(browserId, cloudStatus!, isRegistered);
       }
 
       // 场景4: 本地有Cookie + 云端无记录 → 本地→云端（注册）
       if (hasLocalCookie && !hasCloudRecord) {
+        console.log(`[账号同步] 场景4: 云端无记录，本地→云端注册 - ${browserId}`);
         return await this.syncFromLocalToCloud(browserId, localCookies, false);
       }
 
       // 场景5: 本地有Cookie + 云端有记录但无Cookie → 本地→云端（更新）
       if (hasLocalCookie && hasCloudRecord && !hasCloudCookie) {
+        console.log(`[账号同步] 场景5: 云端Cookie为空，本地→云端更新 - ${browserId}`);
         return await this.syncFromLocalToCloud(browserId, localCookies, true);
       }
 
-      // 场景6: 本地有Cookie + 云端有Cookie → 以云端为准
+      // 场景6: 本地有Cookie + 云端有Cookie → 对比内容是否一致
       if (hasLocalCookie && hasCloudRecord && hasCloudCookie) {
+        // ✅ 如果启用了跳过对比（启动时），直接跳过
+        if (skipComparison) {
+          console.log(`[账号同步] 场景6: 启动时跳过内容对比，避免不必要的API请求 - ${browserId}`);
+          return { success: true, action: 'skip', message: '启动时跳过内容对比' };
+        }
+
+        console.log(`[账号同步] 场景6: 本地和云端都有Cookie，开始对比内容 - ${browserId}`);
         if (force) {
+          console.log(`[账号同步] 场景6: 强制同步模式，直接从云端同步 - ${browserId}`);
           return await this.syncFromCloudToLocal(browserId, cloudStatus!, isRegistered);
         }
 
-        // 对比时间戳：云端Cookie更新时间 vs 本地最后同步时间
-        const localAccount = registeredAccounts[browserId];
-        const localSyncTime = localAccount?.lastSyncTime || 0;
-        const cloudUpdateTime = cloudStatus.cookieUpdatedAt
-          ? new Date(cloudStatus.cookieUpdatedAt).getTime()
-          : 0;
+        // ✅ 对比Cookie内容是否一致
+        try {
+          // 1. 从云端获取Cookie
+          const syncResult = await CloudService.syncCookieFromCloud(browserId);
 
-        // 原则：云端是唯一可信源，只有当云端Cookie更新时间 > 本地同步时间时，才需要同步
-        if (cloudUpdateTime > localSyncTime) {
+          if (!syncResult.cookies || syncResult.cookies.length === 0) {
+            // 云端Cookie为空，使用本地Cookie
+            return { success: true, action: 'skip', message: '云端Cookie为空，跳过同步' };
+          }
+
+          // 2. 将Cookie数组转换为规范化的字符串（排序后对比，避免顺序差异）
+          const normalizeCookieString = (cookies: Array<{ name: string; value: string }>) => {
+            return cookies
+              .map(c => `${c.name}=${c.value}`)
+              .sort()
+              .join('; ');
+          };
+
+          const localCookieString = normalizeCookieString(
+            localCookies.map(c => ({ name: c.name, value: c.value }))
+          );
+          const cloudCookieString = normalizeCookieString(syncResult.cookies);
+
+          // 3. 对比内容
+          if (localCookieString === cloudCookieString) {
+            // Cookie内容一致，跳过同步
+            return { success: true, action: 'skip', message: 'Cookie内容一致，无需同步' };
+          }
+
+          // 4. Cookie内容不一致，需要同步
+          console.log(`[账号同步] Cookie内容不一致，开始同步: ${browserId}`);
+          return await this.syncFromCloudToLocal(browserId, cloudStatus!, isRegistered);
+
+        } catch (error) {
+          console.error(`[账号同步] 对比Cookie失败: ${browserId}`, error);
+          // 对比失败，为了安全起见，执行同步
           return await this.syncFromCloudToLocal(browserId, cloudStatus!, isRegistered);
         }
-
-        // 云端Cookie没有更新 → 跳过
-        return { success: true, action: 'skip', message: '云端Cookie无更新' };
       }
 
       // 兜底：跳过
@@ -225,10 +264,7 @@ export class AccountSyncService {
       await configStore.saveBrowserAccount(browserId, {
         browserId,
         accountInfo,
-        loginMethod: syncResult.loginMethod || cloudStatus.accountInfo?.loginMethod || 'channels_helper',
-        loginTime: Date.now(),
-        updatedAt: new Date().toISOString(),
-        lastSyncTime: Date.now()
+        updatedAt: new Date().toISOString()
       });
 
       // ✅ 更新 browserStore 的内存数据，确保 UI 立即刷新
@@ -294,10 +330,7 @@ export class AccountSyncService {
       await configStore.saveBrowserAccount(browserId, {
         browserId,
         accountInfo,
-        loginMethod: cookieType,
-        loginTime: Date.now(),
-        updatedAt: new Date().toISOString(),
-        lastSyncTime: Date.now()
+        updatedAt: new Date().toISOString()
       });
 
       return {
@@ -307,7 +340,7 @@ export class AccountSyncService {
         accountInfo: {
           nickname: accountInfo.nickname,
           avatar: accountInfo.avatar,
-          loginMethod: cookieType
+          loginMethod: loginMethod
         }
       };
     } catch (error) {
@@ -376,10 +409,10 @@ export class AccountSyncService {
       const browsers = response.data.list;
       result.total = browsers.length;
 
-      // 2. 逐个同步
+      // 2. 逐个同步（启动时跳过内容对比，避免不必要的API请求）
       for (const browser of browsers) {
         try {
-          const syncResult = await this.syncSingle(browser.id);
+          const syncResult = await this.syncSingle(browser.id, false, true);
 
           if (!syncResult.success) {
             result.failed++;

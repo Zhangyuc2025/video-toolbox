@@ -147,6 +147,7 @@ export class CookieService extends BaseService {
 
   /**
    * 获取账号统计信息
+   * ✅ loginMethod 从云端缓存获取（不再从本地存储读取）
    */
   async getAccountStats(): Promise<{
     total: number
@@ -154,14 +155,22 @@ export class CookieService extends BaseService {
     shopHelper: number
   }> {
     const allAccounts = await this.getAllBrowserAccounts()
-    const total = Object.keys(allAccounts).length
+    const browserIds = Object.keys(allAccounts)
+    const total = browserIds.length
     let channelsHelper = 0
     let shopHelper = 0
 
-    for (const accountData of Object.values(allAccounts)) {
-      if (accountData.loginMethod === 'channels_helper') {
+    // ✅ 动态导入 AccountMonitorService，避免循环依赖
+    const { AccountMonitorService } = await import('./account-monitor')
+
+    for (const browserId of browserIds) {
+      // 从云端缓存获取 loginMethod
+      const status = AccountMonitorService.getAccountStatus(browserId)
+      const loginMethod = status?.accountInfo?.loginMethod || 'channels_helper' // 默认值
+
+      if (loginMethod === 'channels_helper') {
         channelsHelper++
-      } else if (accountData.loginMethod === 'shop_helper') {
+      } else if (loginMethod === 'shop_helper') {
         shopHelper++
       }
     }

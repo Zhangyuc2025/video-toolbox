@@ -53,13 +53,15 @@ export interface CloudPushData {
 
   // ===== Cookie数据 =====
   cookies?: CookieData[];
+  channelsSessionid?: string;  // 视频号sessionid（插件自动提取）
+  channelsWxuin?: string;      // 视频号wxuin（插件自动提取）
+  channelsJumpUrl?: string;    // ✅ 视频号跳转链接缓存（带货助手账号专用）
 
   // ===== 时间戳（ISO字符串，云端已自动转换）=====
   lastCheckTime?: string;      // 最后检测时间
   lastValidTime?: string;      // 最后有效时间
   cookieUpdatedAt?: string;    // Cookie更新时间（扫码登录时间）
   cookieExpiredAt?: string;    // Cookie失效时间
-  shopToChannelsUpdatedAt?: number; // 跨平台Cookie更新时间（Unix秒）
 
   // ===== 错误计数 =====
   checkErrorCount?: number;

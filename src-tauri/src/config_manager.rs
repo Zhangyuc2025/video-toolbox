@@ -34,18 +34,24 @@ pub struct AccountInfo {
     pub appuin: Option<String>,
 }
 
-// 账号数据
+// 账号数据（只存储不可变数据）
+// 设计原则：
+// - ✅ 只缓存不常变动的基本信息：nickname, avatar, finderUsername 等
+// - ❌ 不缓存动态状态，实时从云端获取：loginMethod, cookieStatus 等
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountData {
     pub account_info: AccountInfo,
-    pub login_method: String, // "channels_helper" 或 "shop_helper"
-    pub login_time: i64,
     pub updated_at: String,
+    // ✅ 以下动态数据改为可选（已废弃，不再使用）：
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_method: Option<String>, // @deprecated 从云端实时获取
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_time: Option<i64>, // @deprecated 不再存储
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link_token: Option<String>, // 永久链接Token（用于删除云端链接和恢复订阅）
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_sync_time: Option<i64>, // 最后同步时间
+    pub last_sync_time: Option<i64>, // @deprecated 不再存储
 }
 
 // 完整配置结构

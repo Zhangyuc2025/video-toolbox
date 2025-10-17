@@ -29,25 +29,14 @@ const cloudCookieStatus = computed(() => {
   return AccountMonitorService.getAccountStatus(props.browser.id);
 });
 
-// 计算账号信息
+// 计算账号信息（只从云端 Realtime 数据获取）
 const accountInfo = computed(() => {
-  // 优先：云端 Realtime 数据
   const cloudStatus = cloudCookieStatus.value;
   if (cloudStatus?.accountInfo) {
     return {
       nickname: cloudStatus.accountInfo.nickname,
       avatar: cloudStatus.accountInfo.avatar || '',
       loginMethod: cloudStatus.accountInfo.loginMethod
-    };
-  }
-
-  // 后备：本地数据
-  const localInfo = browserStore.getAccountInfo(props.browser.id);
-  if (localInfo) {
-    return {
-      nickname: localInfo.nickname,
-      avatar: (localInfo as any).avatar || localInfo.headImgUrl || '',
-      loginMethod: localInfo.loginMethod
     };
   }
 

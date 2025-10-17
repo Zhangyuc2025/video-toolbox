@@ -23,15 +23,22 @@ export const useCookieStore = defineStore('cookie', () => {
   /** 账号总数 */
   const total = computed(() => Object.keys(accounts.value).length)
 
-  /** 视频号助手账号数 */
-  const channelsHelperCount = computed(() => {
-    return Object.values(accounts.value).filter(a => a.loginMethod === 'channels_helper').length
-  })
+  /** 视频号助手账号数（从云端缓存获取）*/
+  const channelsHelperCount = ref(0)
 
-  /** 小店带货助手账号数 */
-  const shopHelperCount = computed(() => {
-    return Object.values(accounts.value).filter(a => a.loginMethod === 'shop_helper').length
-  })
+  /** 小店带货助手账号数（从云端缓存获取）*/
+  const shopHelperCount = ref(0)
+
+  /** 更新账号统计（从云端缓存获取 loginMethod）*/
+  async function updateStats() {
+    try {
+      const stats = await services.cookie.getAccountStats()
+      channelsHelperCount.value = stats.channelsHelper
+      shopHelperCount.value = stats.shopHelper
+    } catch (error) {
+      console.error('更新账号统计失败:', error)
+    }
+  }
 
   /** 账号统计信息 */
   const stats = computed(() => ({
@@ -51,6 +58,8 @@ export const useCookieStore = defineStore('cookie', () => {
     try {
       accounts.value = await services.cookie.getAllBrowserAccounts()
       lastUpdated.value = new Date()
+      // ✅ 更新统计信息（从云端获取 loginMethod）
+      await updateStats()
     } catch (error) {
       console.error('加载账号信息失败:', error)
     } finally {
@@ -354,6 +363,7 @@ export const useCookieStore = defineStore('cookie', () => {
     deleteCookie,
     batchDeleteCookies,
     updateAccountInfo,
+    updateStats, // ✅ 导出统计更新方法
     refresh,
     hasCookie,
     getAllIds,

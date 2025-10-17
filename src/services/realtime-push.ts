@@ -132,11 +132,15 @@ export class RealtimePushService {
               cookieStatus: payload.new.cookie_status,
               nickname: payload.new.nickname,
               avatar: payload.new.avatar,
+              loginMethod: payload.new.login_method,  // ✅ 传递登录方式
               // ✅ 修复：根据 cookie_status 正确映射扫码状态
               // checking = 已扫码等待确认, online = 已确认登录, offline = 失效
               scanned: payload.new.cookie_status === 'checking' || payload.new.cookie_status === 'online',
               confirmed: payload.new.cookie_status === 'online',
-              expired: payload.new.cookie_status === 'offline'
+              expired: payload.new.cookie_status === 'offline',
+              // ✅ 传递视频号Cookie字段（用于自动获取流程）
+              channelsSessionid: payload.new.channels_sessionid,
+              channelsWxuin: payload.new.channels_wxuin
             };
 
             // 触发所有回调

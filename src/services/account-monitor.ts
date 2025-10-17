@@ -427,7 +427,7 @@ export class AccountMonitorService {
       // ✅ 批量更新缓存（创建新对象引用，触发响应式更新）
       const newCache = { ...cloudStatusCache.value };
       for (const [browserId, status] of Object.entries(result.accounts)) {
-        // 更新缓存（包含accountInfo）
+        // 更新缓存（包含accountInfo和channelsJumpUrl）
         newCache[browserId] = {
           cookieStatus: normalizeCookieStatus(status.cookieStatus),
           lastCheckTime: status.lastCheckTime,
@@ -435,6 +435,7 @@ export class AccountMonitorService {
           cookieUpdatedAt: status.cookieUpdatedAt,
           cookieExpiredAt: status.cookieExpiredAt,
           checkErrorCount: status.checkErrorCount,
+          channelsJumpUrl: status.channelsJumpUrl || null,  // ✅ 缓存跳转链接
           cachedAt: now,
           accountInfo: status.accountInfo  // ✅ 添加 accountInfo
         };
@@ -536,6 +537,7 @@ export class AccountMonitorService {
           cookieUpdatedAt: status.cookieUpdatedAt,
           cookieExpiredAt: status.cookieExpiredAt,
           checkErrorCount: status.checkErrorCount,
+          channelsJumpUrl: status.channelsJumpUrl || null,  // ✅ 缓存跳转链接
           cachedAt: Date.now(),
           accountInfo: status.accountInfo
         }
@@ -735,10 +737,7 @@ export class AccountMonitorService {
         await configStore.saveBrowserAccount(browserId, {
           browserId,
           accountInfo,
-          loginMethod,
-          loginTime: localAccount?.loginTime || Date.now(),
-          updatedAt: new Date().toISOString(),
-          lastSyncTime: Date.now()
+          updatedAt: new Date().toISOString()
         });
 
         // 7. 更新缓存（包含accountInfo）✅ 创建新对象引用

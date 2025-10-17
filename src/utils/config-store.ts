@@ -3,12 +3,16 @@
  * 使用 Rust 后端实现持久化配置
  */
 import { invoke } from '@tauri-apps/api/tauri'
+import { Store } from '@tauri-apps/plugin-store'
 
 class ConfigStore {
   private static instance: ConfigStore
+  private store: Store // 用于还未迁移到Rust的配置项（代理、UI配置等）
 
   private constructor() {
-    // 配置管理在Rust端，这里不需要初始化
+    // 基础配置管理在Rust端
+    // 代理、UI配置等还使用 Store（待迁移）
+    this.store = new Store('settings.json')
   }
 
   /**
