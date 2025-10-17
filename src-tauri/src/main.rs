@@ -1572,7 +1572,9 @@ fn get_plugin_path(app: tauri::AppHandle) -> Result<String, String> {
 
                 if let Some(path) = project_plugin_path {
                     if path.exists() {
-                        let path_str = path
+                        // 使用 dunce 移除 Windows UNC 前缀 (\\?\)
+                        let normalized_path = dunce::simplified(&path);
+                        let path_str = normalized_path
                             .to_str()
                             .ok_or("路径包含无效字符")?
                             .to_string();
@@ -1593,13 +1595,16 @@ fn get_plugin_path(app: tauri::AppHandle) -> Result<String, String> {
     // 拼接插件目录路径（注意：Tauri会将 ../resources/browser-extension 打包到 {resource_dir}/resources/browser-extension）
     let plugin_path: PathBuf = resource_dir.join("resources").join("browser-extension");
 
+    // 使用 dunce 移除 Windows UNC 前缀 (\\?\)，这样 Chrome 才能正确加载扩展
+    let normalized_path = dunce::simplified(&plugin_path);
+
     // 转换为字符串
-    let path_str = plugin_path
+    let path_str = normalized_path
         .to_str()
         .ok_or("路径包含无效字符")?
         .to_string();
 
-    println!("[插件管理] 插件路径: {}", path_str);
+    println!("[插件管理] 插件路径 (已标准化): {}", path_str);
 
     Ok(path_str)
 }

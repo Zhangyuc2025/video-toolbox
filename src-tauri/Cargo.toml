@@ -1,6 +1,6 @@
 [package]
 name = "video-toolbox-tauri"
-version = "1.1.0"
+version = "1.1.1"
 description = "瑙嗛鍙峰伐鍏风"
 authors = ["you"]
 license = ""
@@ -25,6 +25,7 @@ qrcode = "0.13"
 image = "0.24"
 base64 = "0.21"
 chrono = "0.4"
+dunce = "1.0"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
