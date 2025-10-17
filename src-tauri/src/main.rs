@@ -1555,12 +1555,107 @@ async fn get_browser_cookies(browser_id: String) -> Result<ApiResponse, String> 
 
 // ==================== 插件管理命令 ====================
 
+/// 同步插件文件从 resources 到 exe 同目录（用于热更新后更新插件）
+fn sync_plugin_from_resources(app: &tauri::AppHandle) -> Result<(), String> {
+    use std::fs;
+    use std::path::PathBuf;
+
+    // 获取 resource_dir (热更新会更新这里的文件)
+    let resource_dir = app
+        .path_resolver()
+        .resource_dir()
+        .ok_or("无法获取资源目录")?;
+
+    let source_plugin = resource_dir.join("resources").join("browser-extension");
+
+    // 获取 exe 同目录
+    let exe_path = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_dir = exe_path.parent().ok_or("无法获取exe目录")?;
+    let target_plugin = exe_dir.join("browser-extension");
+
+    // 检查源插件是否存在
+    if !source_plugin.exists() {
+        return Err("资源目录中未找到插件".to_string());
+    }
+
+    // 检查是否需要更新：比较 manifest.json 的修改时间
+    let source_manifest = source_plugin.join("manifest.json");
+    let target_manifest = target_plugin.join("manifest.json");
+
+    let need_update = if target_manifest.exists() {
+        // 比较文件修改时间
+        let source_time = fs::metadata(&source_manifest)
+            .and_then(|m| m.modified())
+            .ok();
+        let target_time = fs::metadata(&target_manifest)
+            .and_then(|m| m.modified())
+            .ok();
+
+        match (source_time, target_time) {
+            (Some(src), Some(tgt)) => src > tgt,
+            _ => true, // 无法获取时间，强制更新
+        }
+    } else {
+        true // 目标不存在，需要复制
+    };
+
+    if need_update {
+        println!("[插件同步] 检测到插件更新，正在同步到 exe 目录...");
+
+        // 删除旧的插件目录
+        if target_plugin.exists() {
+            fs::remove_dir_all(&target_plugin).map_err(|e| {
+                format!("删除旧插件失败: {}", e)
+            })?;
+        }
+
+        // 复制新插件
+        copy_dir_all(&source_plugin, &target_plugin).map_err(|e| {
+            format!("复制插件失败: {}", e)
+        })?;
+
+        println!("[插件同步] ✅ 插件同步成功: {}", target_plugin.display());
+    } else {
+        println!("[插件同步] 插件已是最新版本");
+    }
+
+    Ok(())
+}
+
+/// 递归复制目录
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    use std::fs;
+
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dst_path = dst.join(entry.file_name());
+
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &dst_path)?;
+        } else {
+            fs::copy(entry.path(), dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 // 获取插件路径
 #[tauri::command]
 fn get_plugin_path(app: tauri::AppHandle) -> Result<String, String> {
     // 统一从 exe 同目录下的 browser-extension 文件夹获取
     // 开发环境：target/debug/browser-extension
     // 生产环境：C:\Program Files\视频号工具箱\browser-extension
+
+    // 首先尝试同步插件（生产环境）
+    #[cfg(not(debug_assertions))]
+    {
+        if let Err(e) = sync_plugin_from_resources(&app) {
+            println!("[插件同步] 警告: {}", e);
+        }
+    }
+
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
             let plugin_path = exe_dir.join("browser-extension");
