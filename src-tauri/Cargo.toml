@@ -1,6 +1,6 @@
 [package]
 name = "video-toolbox-tauri"
-version = "1.0.6"
+version = "1.1.0"
 description = "瑙嗛鍙峰伐鍏风"
 authors = ["you"]
 license = ""
