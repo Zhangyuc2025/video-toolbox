@@ -1265,6 +1265,9 @@ async fn open_browser(
     // 构建 args 数组：添加扩展路径 + 启动 URL
     let mut args_vec = args.unwrap_or(vec![]);
 
+    // 🔧 Chrome v137+ 需要添加此参数以重新启用 --load-extension 功能
+    args_vec.push("--disable-features=DisableLoadExtensionCommandLineSwitch".to_string());
+
     // 🎯 添加扩展加载参数（使用 --load-extension）
     match get_plugin_path(app) {
         Ok(plugin_path) => {
@@ -1557,7 +1560,7 @@ async fn get_browser_cookies(browser_id: String) -> Result<ApiResponse, String> 
 fn get_plugin_path(app: tauri::AppHandle) -> Result<String, String> {
     use std::path::PathBuf;
 
-    // 开发环境检测：如果 CARGO_TARGET_DIR 或其他开发环境变量存在
+    // 开发环境检测：从项目根目录获取
     #[cfg(debug_assertions)]
     {
         // 开发环境：尝试从项目根目录获取
@@ -1572,9 +1575,7 @@ fn get_plugin_path(app: tauri::AppHandle) -> Result<String, String> {
 
                 if let Some(path) = project_plugin_path {
                     if path.exists() {
-                        // 使用 dunce 移除 Windows UNC 前缀 (\\?\)
-                        let normalized_path = dunce::simplified(&path);
-                        let path_str = normalized_path
+                        let path_str = path
                             .to_str()
                             .ok_or("路径包含无效字符")?
                             .to_string();
@@ -1586,27 +1587,26 @@ fn get_plugin_path(app: tauri::AppHandle) -> Result<String, String> {
         }
     }
 
-    // 生产环境或开发环境 fallback：使用 Tauri resource_dir
-    let resource_dir = app
-        .path_resolver()
-        .resource_dir()
-        .ok_or("无法获取资源目录")?;
+    // 生产环境：从 exe 同目录下的 browser-extension 文件夹获取
+    // 例如：C:\Program Files\视频号工具箱\browser-extension
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let plugin_path = exe_dir.join("browser-extension");
 
-    // 拼接插件目录路径（注意：Tauri会将 ../resources/browser-extension 打包到 {resource_dir}/resources/browser-extension）
-    let plugin_path: PathBuf = resource_dir.join("resources").join("browser-extension");
+            if plugin_path.exists() {
+                let path_str = plugin_path
+                    .to_str()
+                    .ok_or("路径包含无效字符")?
+                    .to_string();
+                println!("[插件管理] 生产环境插件路径 (exe同目录): {}", path_str);
+                return Ok(path_str);
+            } else {
+                println!("[插件管理] 警告: exe同目录下未找到插件: {}", plugin_path.display());
+            }
+        }
+    }
 
-    // 使用 dunce 移除 Windows UNC 前缀 (\\?\)，这样 Chrome 才能正确加载扩展
-    let normalized_path = dunce::simplified(&plugin_path);
-
-    // 转换为字符串
-    let path_str = normalized_path
-        .to_str()
-        .ok_or("路径包含无效字符")?
-        .to_string();
-
-    println!("[插件管理] 插件路径 (已标准化): {}", path_str);
-
-    Ok(path_str)
+    Err("无法找到插件目录".to_string())
 }
 
 // 获取浏览器详情
