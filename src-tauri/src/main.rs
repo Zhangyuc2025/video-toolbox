@@ -1558,37 +1558,9 @@ async fn get_browser_cookies(browser_id: String) -> Result<ApiResponse, String> 
 // 获取插件路径
 #[tauri::command]
 fn get_plugin_path(app: tauri::AppHandle) -> Result<String, String> {
-    use std::path::PathBuf;
-
-    // 开发环境检测：从项目根目录获取
-    #[cfg(debug_assertions)]
-    {
-        // 开发环境：尝试从项目根目录获取
-        if let Ok(exe_dir) = std::env::current_exe() {
-            // 向上查找到 src-tauri 目录，然后定位 resources
-            if let Some(exe_parent) = exe_dir.parent() {
-                let project_plugin_path = exe_parent
-                    .parent()  // target/debug -> target
-                    .and_then(|p| p.parent())  // target -> src-tauri
-                    .and_then(|p| p.parent())  // src-tauri -> toolbox
-                    .map(|p| p.join("resources").join("browser-extension"));
-
-                if let Some(path) = project_plugin_path {
-                    if path.exists() {
-                        let path_str = path
-                            .to_str()
-                            .ok_or("路径包含无效字符")?
-                            .to_string();
-                        println!("[插件管理] 开发环境插件路径: {}", path_str);
-                        return Ok(path_str);
-                    }
-                }
-            }
-        }
-    }
-
-    // 生产环境：从 exe 同目录下的 browser-extension 文件夹获取
-    // 例如：C:\Program Files\视频号工具箱\browser-extension
+    // 统一从 exe 同目录下的 browser-extension 文件夹获取
+    // 开发环境：target/debug/browser-extension
+    // 生产环境：C:\Program Files\视频号工具箱\browser-extension
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
             let plugin_path = exe_dir.join("browser-extension");
@@ -1598,15 +1570,23 @@ fn get_plugin_path(app: tauri::AppHandle) -> Result<String, String> {
                     .to_str()
                     .ok_or("路径包含无效字符")?
                     .to_string();
-                println!("[插件管理] 生产环境插件路径 (exe同目录): {}", path_str);
+
+                #[cfg(debug_assertions)]
+                println!("[插件管理] 开发环境插件路径: {}", path_str);
+
+                #[cfg(not(debug_assertions))]
+                println!("[插件管理] 生产环境插件路径: {}", path_str);
+
                 return Ok(path_str);
             } else {
-                println!("[插件管理] 警告: exe同目录下未找到插件: {}", plugin_path.display());
+                let error_msg = format!("exe同目录下未找到插件: {}", plugin_path.display());
+                println!("[插件管理] 错误: {}", error_msg);
+                return Err(error_msg);
             }
         }
     }
 
-    Err("无法找到插件目录".to_string())
+    Err("无法获取exe路径".to_string())
 }
 
 // 获取浏览器详情
