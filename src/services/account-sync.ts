@@ -69,6 +69,9 @@ export interface FullSyncResult {
  * 本服务只负责同步逻辑，不创建独立的 Realtime 订阅
  */
 export class AccountSyncService {
+  // ✅ 全局同步锁：防止并发注册同一个浏览器
+  private static syncLocks = new Map<string, Promise<SyncResult>>();
+
   /**
    * 同步单个浏览器账号
    *
@@ -87,6 +90,30 @@ export class AccountSyncService {
    * @param skipComparison 跳过内容对比（启动时使用，避免不必要的API请求）
    */
   static async syncSingle(browserId: string, force: boolean = false, skipComparison: boolean = false): Promise<SyncResult> {
+    // ✅ 检查是否已有正在进行的同步操作
+    const existingSync = this.syncLocks.get(browserId);
+    if (existingSync) {
+      console.log(`[账号同步] ${browserId} 正在同步中，等待完成...`);
+      return existingSync;
+    }
+
+    // ✅ 创建新的同步任务并加锁
+    const syncTask = this._doSyncSingle(browserId, force, skipComparison);
+    this.syncLocks.set(browserId, syncTask);
+
+    try {
+      const result = await syncTask;
+      return result;
+    } finally {
+      // ✅ 同步完成，释放锁
+      this.syncLocks.delete(browserId);
+    }
+  }
+
+  /**
+   * 内部同步逻辑（实际执行同步）
+   */
+  private static async _doSyncSingle(browserId: string, force: boolean = false, skipComparison: boolean = false): Promise<SyncResult> {
     try {
       // 1. 获取本地注册状态
       const registeredAccounts = await configStore.getBrowserAccounts();
@@ -353,12 +380,11 @@ export class AccountSyncService {
   }
 
   /**
-   * 启动时全量双向同步
+   * 启动时自动发现并注册新浏览器
    *
-   * 工作流程：
-   * 1. 获取所有本地已注册账号
-   * 2. 获取所有本地比特浏览器（支持用户筛选）
-   * 3. 对每个浏览器执行 syncSingle()
+   * ✅ 职责明确：只负责发现本地有Cookie但云端无记录的浏览器，注册它们
+   * ✅ 不查询账号状态、不同步Cookie内容（由 AccountMonitorService 负责）
+   * ✅ 极轻量：只在需要注册时才调用API
    *
    * @param options 同步选项
    * @param options.filterUserName 可选的用户名筛选（只同步该用户创建的浏览器）
@@ -381,7 +407,6 @@ export class AccountSyncService {
       // 1. 确定用户筛选配置
       let filterUserName = options?.filterUserName;
 
-      // 如果没有明确指定，但启用了自动应用用户筛选
       if (!filterUserName && (options?.autoApplyUserFilter !== false)) {
         const filterMyAccounts = await configStore.getFilterMyAccounts();
         if (filterMyAccounts) {
@@ -389,7 +414,11 @@ export class AccountSyncService {
         }
       }
 
-      // 2. 获取所有比特浏览器列表（应用用户筛选）
+      // 2. 获取本地已注册账号
+      const registeredAccounts = await configStore.getBrowserAccounts();
+      const registeredBrowserIds = Object.keys(registeredAccounts);
+
+      // 3. 获取所有比特浏览器列表（应用用户筛选）
       const params: any = {
         page: 0,
         pageSize: 1000
@@ -409,64 +438,72 @@ export class AccountSyncService {
       const browsers = response.data.list;
       result.total = browsers.length;
 
-      // 2. 逐个同步（启动时跳过内容对比，避免不必要的API请求）
-      for (const browser of browsers) {
+      // 4. 找出未注册的浏览器（本地浏览器存在但配置中没有）
+      const unregisteredBrowsers = browsers.filter((b: any) => !registeredBrowserIds.includes(b.id));
+
+      if (unregisteredBrowsers.length === 0) {
+        console.log('[账号同步] 没有发现未注册的浏览器');
+        result.skipped = browsers.length;
+        return result;
+      }
+
+      console.log(`[账号同步] 发现 ${unregisteredBrowsers.length} 个未注册的浏览器`);
+
+      // 5. 逐个注册（只处理未注册的）
+      for (const browser of unregisteredBrowsers) {
         try {
-          const syncResult = await this.syncSingle(browser.id, false, true);
+          // ✅ 获取本地Cookie
+          let localCookies: any[] = [];
+          try {
+            const cookieResponse = await invoke<any>('get_browser_cookies', { browserId: browser.id });
+            if (cookieResponse.success && cookieResponse.data?.cookies) {
+              localCookies = cookieResponse.data.cookies;
+            }
+          } catch (error) {
+            console.error(`[账号同步] 获取本地Cookie失败: ${browser.id}`, error);
+            result.failed++;
+            continue;
+          }
+
+          // 没有Cookie，跳过（等待用户登录）
+          if (localCookies.length === 0) {
+            console.log(`[账号同步] ${browser.id} 无Cookie，跳过注册`);
+            result.skipped++;
+            continue;
+          }
+
+          // ✅ 有Cookie，注册到云端
+          const syncResult = await this.syncFromLocalToCloud(browser.id, localCookies, false);
 
           if (!syncResult.success) {
             result.failed++;
             continue;
           }
 
-          if (syncResult.action === 'skip') {
-            result.skipped++;
-            continue;
-          }
+          result.localToCloud++;
+          result.syncedAccounts.push({
+            browserId: browser.id,
+            nickname: syncResult.accountInfo?.nickname || browser.name,
+            action: 'local_to_cloud'
+          });
 
-          if (syncResult.action === 'cloud_to_local') {
-            result.cloudToLocal++;
-            result.syncedAccounts.push({
-              browserId: browser.id,
-              nickname: syncResult.accountInfo?.nickname || browser.name,
-              action: 'cloud_to_local'
-            });
-          }
-
-          if (syncResult.action === 'local_to_cloud') {
-            result.localToCloud++;
-            result.syncedAccounts.push({
-              browserId: browser.id,
-              nickname: syncResult.accountInfo?.nickname || browser.name,
-              action: 'local_to_cloud'
-            });
-          }
         } catch (error) {
-          console.error(`[账号同步] 同步浏览器 ${browser.id} 失败:`, error);
+          console.error(`[账号同步] 注册浏览器 ${browser.id} 失败:`, error);
           result.failed++;
         }
       }
 
-      // 3. 显示通知
-      const totalSynced = result.cloudToLocal + result.localToCloud;
-      if (totalSynced > 0) {
-        const messages: string[] = [];
-        if (result.cloudToLocal > 0) {
-          messages.push(`云端→本地 ${result.cloudToLocal}个`);
-        }
-        if (result.localToCloud > 0) {
-          messages.push(`本地→云端 ${result.localToCloud}个`);
-        }
-
+      // 6. 显示通知
+      if (result.localToCloud > 0) {
         const displayNames = result.syncedAccounts.slice(0, 3).map(a => a.nickname).join('、');
         const meta = result.syncedAccounts.length > 3
           ? `${displayNames} 等${result.syncedAccounts.length}个`
           : displayNames;
 
         notification.success(
-          `已同步 ${totalSynced} 个账号（${messages.join('，')}}）`,
+          `已注册 ${result.localToCloud} 个新账号到云端`,
           {
-            title: '账号同步完成',
+            title: '账号注册完成',
             duration: 5000,
             meta
           }
@@ -476,7 +513,7 @@ export class AccountSyncService {
       return result;
 
     } catch (error) {
-      console.error('[账号同步] 全量同步失败:', error);
+      console.error('[账号同步] 自动发现注册失败:', error);
       return result;
     }
   }

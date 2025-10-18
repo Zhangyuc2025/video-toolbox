@@ -677,6 +677,7 @@ export class AccountMonitorService {
 
   /**
    * 同步本地有但云端没有的账号
+   * ✅ 使用 AccountSyncService.syncSingle 统一处理，避免重复注册
    */
   private static async syncMissingAccounts(
     missingBrowserIds: string[],
@@ -685,82 +686,42 @@ export class AccountMonitorService {
     let successCount = 0;
     let failCount = 0;
 
+    console.log(`[账号监控] 开始同步 ${missingBrowserIds.length} 个云端缺失的账号`);
+
     for (const browserId of missingBrowserIds) {
       try {
-        // 1. 获取浏览器Cookie
-        const cookieResponse = await invoke<any>('get_browser_cookies', {
-          browserId
-        });
+        // ✅ 使用 AccountSyncService.syncSingle 统一处理
+        // 它会自动判断状态矩阵，并且有全局锁防止并发注册
+        const result = await AccountSyncService.syncSingle(browserId, false, false);
 
-        if (!cookieResponse.success) {
+        if (!result.success || result.action === 'skip') {
           failCount++;
           continue;
         }
 
-        const cookies = (cookieResponse.data?.cookies || []) as Array<{ name: string; value: string; domain: string }>;
+        // ✅ 同步成功，更新缓存
+        if (result.action === 'local_to_cloud' && result.accountInfo) {
+          const normalizedStatus = normalizeCookieStatus('online');
+          cloudStatusCache.value = {
+            ...cloudStatusCache.value,
+            [browserId]: {
+              cookieStatus: normalizedStatus,
+              lastCheckTime: new Date().toISOString(),
+              lastValidTime: normalizedStatus === 'online' ? new Date().toISOString() : null,
+              cookieUpdatedAt: null,
+              cookieExpiredAt: null,
+              checkErrorCount: 0,
+              cachedAt: Date.now(),
+              accountInfo: {
+                nickname: result.accountInfo.nickname,
+                avatar: result.accountInfo.avatar,
+                loginMethod: result.accountInfo.loginMethod
+              }
+            }
+          };
 
-        // 2. 识别Cookie类型
-        const loginMethod = this.detectLoginMethod(cookies);
-
-        // 3. 格式化Cookie
-        const formattedCookies = cookies.map(c => ({
-          name: c.name,
-          value: c.value,
-          domain: c.domain.startsWith('.') ? c.domain : `.${c.domain}`,
-          path: '/',
-          secure: true,
-          httpOnly: false
-        }));
-
-        // 4. 读取本地账号信息
-        const localAccount = allAccounts[browserId];
-
-        // 5. 调用云端注册
-        const registerResult = await CloudService.autoRegisterBrowser(
-          browserId,
-          formattedCookies,
-          loginMethod,
-          localAccount?.accountInfo
-        );
-
-        if (!registerResult) {
-          failCount++;
-          continue;
+          successCount++;
         }
-
-        // 6. 更新本地配置
-        const accountInfo = registerResult.accountInfo || localAccount?.accountInfo || {
-          nickname: '未知账号',
-          avatar: ''
-        };
-
-        await configStore.saveBrowserAccount(browserId, {
-          browserId,
-          accountInfo,
-          updatedAt: new Date().toISOString()
-        });
-
-        // 7. 更新缓存（包含accountInfo）✅ 创建新对象引用
-        const normalizedStatus = normalizeCookieStatus(registerResult.cookieStatus);
-        cloudStatusCache.value = {
-          ...cloudStatusCache.value,
-          [browserId]: {
-            cookieStatus: normalizedStatus,
-            lastCheckTime: new Date().toISOString(),
-            lastValidTime: normalizedStatus === 'online' ? new Date().toISOString() : null,
-            cookieUpdatedAt: null,
-            cookieExpiredAt: null,
-            checkErrorCount: 0,
-            cachedAt: Date.now(),
-            accountInfo: registerResult.accountInfo ? {
-              nickname: registerResult.accountInfo.nickname || accountInfo.nickname,
-              avatar: registerResult.accountInfo.avatar || accountInfo.avatar,
-              loginMethod: loginMethod
-            } : null
-          }
-        };
-
-        successCount++;
 
       } catch (error) {
         console.error(`[账号监控] 同步账号 ${browserId} 时出错:`, error);

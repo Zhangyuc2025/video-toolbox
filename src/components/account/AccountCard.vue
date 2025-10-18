@@ -40,11 +40,38 @@ const accountInfo = computed(() => {
     return {
       nickname: cloudStatus.accountInfo.nickname,
       headImgUrl: cloudStatus.accountInfo.avatar || '',
-      accountState: 0 // 云端暂无此字段，默认正常
+      accountState: cloudStatus.accountInfo.accountState ?? 0  // ✅ 从云端获取账号状态
     };
   }
 
   return null;
+});
+
+// 账号状态徽章信息
+const accountStateBadge = computed(() => {
+  if (!accountInfo.value) {
+    return null;
+  }
+
+  const state = accountInfo.value.accountState;
+
+  if (state === undefined || state === null) {
+    // 未获取到状态
+    return { text: '未知', type: 'default' as const };
+  }
+
+  if (state === 0) {
+    // 正常状态
+    return { text: '正常', type: 'success' as const };
+  }
+
+  if (state === 1) {
+    // 异常/违规状态
+    return { text: '违规', type: 'error' as const };
+  }
+
+  // 其他未知状态
+  return { text: '未知', type: 'default' as const };
 });
 
 // 计算Cookie检测状态
@@ -269,13 +296,13 @@ const handleDropdownSelect = (key: string) => {
 
         <!-- 徽章标签（不可点击） -->
         <NTag
-          v-if="accountInfo"
-          type="default"
+          v-if="accountStateBadge"
+          :type="accountStateBadge.type"
           size="tiny"
           :bordered="false"
           class="account-badge"
         >
-          未知
+          {{ accountStateBadge.text }}
         </NTag>
       </div>
 

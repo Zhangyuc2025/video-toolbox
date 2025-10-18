@@ -14,6 +14,7 @@ import { AccountSyncService } from '@/services/account-sync';
 import { realtimePushService } from '@/services/realtime-push';
 import { PluginManagerService } from '@/services/plugin-manager';
 import { autoFetchChannelsCookie } from '@/services/channels-cookie-fetcher';
+import { localCookieValidator } from '@/services/local-cookie-validator';
 import type { ApiResponse, BrowserListResponse } from '@/types/browser';
 
 const router = useRouter();
@@ -254,20 +255,40 @@ const handleOpenBrowser = async (browserId: string) => {
 
     console.log(`[打开浏览器] 步骤2.1: 账号登录方式 = ${loginMethod}`);
 
-    // 🔥 步骤2.2：使用云端智能验证（已自动处理 channels 和 shop helper 两种Cookie）
-    console.log(`[打开浏览器] 步骤2.2: 调用云端智能验证 - ${browserId} (${loginMethod})`);
+    // 🔥 步骤2.2：使用本地智能验证（根据 loginMethod 调用对应的验证API）
+    console.log(`[打开浏览器] 步骤2.2: 调用本地智能验证 - ${browserId} (${loginMethod})`);
 
     try {
-      const validationResult = await CloudService.instantValidateCookie(browserId);
+      const validationResult = await localCookieValidator.validateCookie(browserId, loginMethod);
 
       if (!validationResult) {
         message.destroyAll();
-        notification.error(`Cookie验证失败：无法连接到验证服务`, {
+        notification.error(`Cookie验证失败：无法获取浏览器Cookie`, {
           title: '启动失败',
           duration: 5000
         });
         return;
       }
+
+      // 🔥 步骤2.3：将本地验证结果上报到云端（更新数据库，触发Realtime推送）
+      console.log(`[打开浏览器] 步骤2.3: 上报验证结果到云端 - ${browserId}`);
+      try {
+        await CloudService.reportValidationResult(browserId, {
+          valid: validationResult.valid,
+          nickname: validationResult.nickname,
+          avatar: validationResult.avatar,
+          accountState: validationResult.accountState,  // ✅ 账号状态: 0=正常, 1=异常
+          error: validationResult.error,
+          needRefetchChannelsCookie: validationResult.needRefetchChannelsCookie
+        });
+        console.log(`[打开浏览器] 验证结果已上报到云端，数据库将自动更新`);
+      } catch (reportError) {
+        console.error(`[打开浏览器] 上报验证结果失败:`, reportError);
+        // 上报失败不影响后续流程，继续执行
+      }
+
+      // 🔥 步骤2.4：刷新本地缓存（从云端获取最新状态）
+      await AccountMonitorService.refreshAccountStatus(browserId);
 
       if (!validationResult.valid) {
         // Cookie已失效，拒绝打开
@@ -278,30 +299,39 @@ const handleOpenBrowser = async (browserId: string) => {
           duration: 5000
         });
         console.error(`[打开浏览器] Cookie验证失败，拒绝打开: ${browserId}`, validationResult.error);
-        await AccountMonitorService.refreshAccountStatus(browserId);
         return;
       }
 
       // ✅ Cookie有效，允许打开
       console.log(`[打开浏览器] Cookie验证通过 - ${browserId}`);
-      await AccountMonitorService.refreshAccountStatus(browserId);
 
-      // ⚠️ 对于带货助手账号，检查是否需要重新获取视频号Cookie
-      if (loginMethod === 'shop_helper' && validationResult.needRefetchChannelsCookie) {
-        console.log(`[打开浏览器] ⚠️ 云端检测到需要重新获取视频号Cookie - ${browserId}`);
-        notification.info(`带货助手Cookie正常，打开后将自动获取视频号Cookie`, {
-          title: `#${browserSeq} ${accountName}`,
-          duration: 3000
-        });
+      // ⚠️ 对于带货助手账号，检查云端数据库是否有视频号Cookie
+      if (loginMethod === 'shop_helper') {
+        try {
+          const accountStatus = await CloudService.checkAccountStatus(browserId);
+          const hasChannelsCookie = accountStatus?.channelsSessionid && accountStatus?.channelsWxuin;
 
-        // 稍后自动获取视频号Cookie
-        setTimeout(() => {
-          autoFetchChannelsCookie({
-            browserId,
-            nickname: accountName,
-            skipOpen: true
-          });
-        }, 2000);
+          if (!hasChannelsCookie) {
+            console.log(`[打开浏览器] ⚠️ 云端数据库无视频号Cookie，需要重新获取 - ${browserId}`);
+            notification.info(`带货助手Cookie正常，打开后将自动获取视频号Cookie`, {
+              title: `#${browserSeq} ${accountName}`,
+              duration: 3000
+            });
+
+            // 稍后自动获取视频号Cookie
+            setTimeout(() => {
+              autoFetchChannelsCookie({
+                browserId,
+                nickname: accountName,
+                skipOpen: true
+              });
+            }, 2000);
+          } else {
+            console.log(`[打开浏览器] ✅ 云端数据库已有视频号Cookie，无需重新获取 - ${browserId}`);
+          }
+        } catch (error) {
+          console.error(`[打开浏览器] 检查视频号Cookie失败:`, error);
+        }
       }
     } catch (error) {
       message.destroyAll();
@@ -450,51 +480,6 @@ const handleDeleteBrowser = async (browserId: string) => {
   });
 };
 
-// 检测Cookie有效性
-const handleCheckCookie = async (browserId: string) => {
-  // 获取账号信息
-  const browser = browserStore.getBrowser(browserId);
-  const cloudStatus = AccountMonitorService.getAccountStatus(browserId);
-  const accountName = cloudStatus?.accountInfo?.nickname || browser?.name || browserId;
-  const browserSeq = browser?.seq || '?';
-
-  try {
-    browserStore.setCookieChecking(browserId, true);
-    message.info(`正在检测 #${browserSeq} 账号 ${accountName} 的Cookie有效性...`);
-
-    // 调用云端即时验证接口
-    const result = await CloudService.instantValidateCookie(browserId);
-
-    if (!result) {
-      notification.error('Cookie检测失败：无法连接到验证服务', {
-        title: `检测失败 - #${browserSeq} ${accountName}`
-      });
-      return;
-    }
-
-    if (result.valid) {
-      notification.success(`Cookie有效，账号在线`, {
-        title: `检测成功 - #${browserSeq} ${accountName}`,
-        meta: result.nickname || accountName
-      });
-    } else {
-      notification.error(`Cookie已失效：${result.error || '未知原因'}`, {
-        title: `检测失败 - #${browserSeq} ${accountName}`,
-        duration: 8000
-      });
-    }
-
-    // 刷新账号状态
-    await AccountMonitorService.refreshAccountStatus(browserId);
-  } catch (error) {
-    console.error('检测Cookie失败:', error);
-    notification.error(`检测异常: ${error}`, {
-      title: `检测失败 - #${browserSeq} ${accountName}`
-    });
-  } finally {
-    browserStore.setCookieChecking(browserId, false);
-  }
-};
 
 // 跳转到设置页面
 const goToSettings = () => {
@@ -696,7 +681,6 @@ onBeforeUnmount(() => {
           @open="handleOpenBrowser"
           @close="handleCloseBrowser"
           @delete="handleDeleteBrowser"
-          @check-cookie="handleCheckCookie"
         />
       </div>
 

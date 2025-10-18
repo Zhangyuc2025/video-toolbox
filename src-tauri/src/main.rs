@@ -896,6 +896,713 @@ async fn check_shop_helper_status(
     }
 }
 
+// ==================== Cookie 验证命令 ====================
+
+// Cookie验证结果结构
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CookieValidationResult {
+    valid: bool,
+    cookie_status: String, // "online" | "offline" | "checking"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nickname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    avatar: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wechat_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finder_username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    appuin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shop_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_state: Option<i64>,  // 账号状态: 0=正常, 1=异常/违规
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    login_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    need_refetch_channels_cookie: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_rate_limited: Option<bool>,
+}
+
+// Cookie对象结构
+#[derive(Debug, Serialize, Deserialize)]
+struct CookieItem {
+    name: String,
+    value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain: Option<String>,
+}
+
+/// 验证Cookie（统一入口）
+///
+/// ✅ 修复：接受 login_method 参数，不再通过Cookie名称检测
+/// login_method 来自云端数据库，是权威来源
+#[tauri::command]
+async fn validate_cookie(browser_id: String, login_method: String) -> Result<serde_json::Value, String> {
+    println!("[验证Cookie] 开始验证浏览器: {}, 登录方式: {}", browser_id, login_method);
+
+    // 1. 获取浏览器Cookie
+    let cookies_result = get_browser_cookies(browser_id.clone()).await?;
+
+    if !cookies_result.success {
+        return Ok(serde_json::json!({
+            "valid": false,
+            "cookieStatus": "offline",
+            "error": "无法获取浏览器Cookie"
+        }));
+    }
+
+    let cookies_data = cookies_result.data.ok_or("Cookie数据为空")?;
+    let cookies_array = cookies_data["cookies"]
+        .as_array()
+        .ok_or("Cookie格式错误")?;
+
+    // 将JSON Value转换为CookieItem结构
+    let cookies: Vec<CookieItem> = cookies_array
+        .iter()
+        .filter_map(|c| {
+            Some(CookieItem {
+                name: c["name"].as_str()?.to_string(),
+                value: c["value"].as_str()?.to_string(),
+                domain: c["domain"].as_str().map(|s| s.to_string()),
+            })
+        })
+        .collect();
+
+    println!("[验证Cookie] 获取到 {} 个Cookie", cookies.len());
+
+    // 2. 根据登录方式验证（不再自动检测，使用传入的参数）
+    let result = match login_method.as_str() {
+        "channels_helper" => validate_channels_helper_cookie(&cookies, 0).await?,
+        "shop_helper" => validate_shop_helper_cookie(&cookies, 0).await?,
+        _ => {
+            return Ok(serde_json::json!({
+                "valid": false,
+                "cookieStatus": "offline",
+                "error": "不支持的登录方式"
+            }));
+        }
+    };
+
+    Ok(serde_json::to_value(result).unwrap())
+}
+
+/// 识别登录方式
+fn detect_login_method(cookies: &[CookieItem]) -> Option<String> {
+    if cookies.is_empty() {
+        return None;
+    }
+
+    let cookie_names: Vec<&str> = cookies.iter().map(|c| c.name.as_str()).collect();
+
+    // 带货助手（小店助手）特征：talent_token
+    if cookie_names.contains(&"talent_token") {
+        return Some("shop_helper".to_string());
+    }
+
+    // 视频号助手特征：sessionid 或 wxuin
+    if cookie_names.contains(&"sessionid") || cookie_names.contains(&"wxuin") {
+        return Some("channels_helper".to_string());
+    }
+
+    // 默认：视频号助手
+    Some("channels_helper".to_string())
+}
+
+/// 检查是否有视频号Cookie（用于带货助手账号）
+fn has_channels_cookie(cookies: &[CookieItem]) -> bool {
+    let cookie_names: Vec<&str> = cookies.iter().map(|c| c.name.as_str()).collect();
+    cookie_names.contains(&"sessionid") || cookie_names.contains(&"wxuin")
+}
+
+/// 验证视频号助手Cookie（带重试机制）
+/// 使用手机端轻量级API - 快速检测状态 + 获取账号状态信息
+async fn validate_channels_helper_cookie(
+    cookies: &[CookieItem],
+    retry_count: u32,
+) -> Result<CookieValidationResult, String> {
+    const MAX_RETRIES: u32 = 3;
+    const RETRY_DELAY_MS: u64 = 2000;
+
+    // ⭐ 关键：Cookie转换 - 手机端API需要 _finder_auth
+    // PC端: sessionid=xxx; wxuin=xxx
+    // 手机端: _finder_auth=xxx; wxuin=xxx
+    let sessionid = cookies
+        .iter()
+        .find(|c| c.name == "sessionid" || c.name == "_finder_auth")
+        .map(|c| c.value.clone())
+        .ok_or("缺少sessionid")?;
+
+    let wxuin = cookies
+        .iter()
+        .find(|c| c.name == "wxuin")
+        .map(|c| c.value.clone())
+        .ok_or("缺少wxuin")?;
+
+    // 构造手机端Cookie字符串
+    let cookie_str = format!("_finder_auth={}; wxuin={}", sessionid, wxuin);
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .to_string();
+
+    let client = create_http_client_with_timeout(10)?;
+
+    // ⭐ 使用手机端轻量级API（需要 assistant-support 前缀）
+    let url = "https://channels.weixin.qq.com/assistant-support/api/finder-account-status/get-finder-acct-state";
+
+    if retry_count > 0 {
+        println!(
+            "[视频号助手] 开始验证Cookie（手机端API），重试次数: {}/{}",
+            retry_count, MAX_RETRIES
+        );
+    } else {
+        println!("[视频号助手] 开始验证Cookie（手机端轻量级API）");
+    }
+
+    // 手机端API请求体（简化格式）
+    let body = serde_json::json!({
+        "_timestamp": timestamp
+    });
+
+    // 手机端User-Agent（iPhone）
+    match client
+        .post(url)
+        .header("Accept", "application/json, text/plain, */*")
+        .header("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148")
+        .header("Content-Type", "application/json")
+        .header("Accept-Language", "zh-CN,zh;q=0.9")
+        .header("Cookie", &cookie_str)
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(response) => {
+            let status = response.status();
+
+            // 401/403 表示Cookie无效，不重试
+            if status == 401 || status == 403 {
+                println!("[视频号助手] Cookie无效 (401/403)");
+                return Ok(CookieValidationResult {
+                    valid: false,
+                    cookie_status: "offline".to_string(),
+                    nickname: None,
+                    avatar: None,
+                    wechat_id: None,
+                    finder_username: None,
+                    appuin: None,
+                    shop_name: None,
+                    account_state: None,
+                    error: Some("Cookie已过期或无效".to_string()),
+                    login_method: Some("channels_helper".to_string()),
+                    need_refetch_channels_cookie: None,
+                    is_rate_limited: None,
+                });
+            }
+
+            let result: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| format!("解析响应失败: {}", e))?;
+
+            println!(
+                "[视频号助手] 手机端API响应: errCode={}, hasData={}",
+                result["errCode"],
+                result["data"].is_object()
+            );
+
+            // 手机端API响应格式：
+            // { "errCode": 0, "data": { "baseResp": { "errcode": 0 }, "nickname": "...", "state": 0, ... } }
+
+            // 1. 先检查外层errCode
+            if result["errCode"].as_i64() != Some(0) {
+                let err_msg = result["errMsg"].as_str().unwrap_or("未知错误");
+                println!("[视频号助手] API返回错误: {}", err_msg);
+
+                let err_code = result["errCode"].as_i64().unwrap_or(0);
+                let is_rate_limited = err_code == 45009
+                    || err_msg.contains("freq")
+                    || err_msg.contains("limit");
+
+                return Ok(CookieValidationResult {
+                    valid: false,
+                    cookie_status: "offline".to_string(),
+                    nickname: None,
+                    avatar: None,
+                    wechat_id: None,
+                    finder_username: None,
+                    appuin: None,
+                    shop_name: None,
+                    account_state: None,
+                    error: Some(err_msg.to_string()),
+                    login_method: Some("channels_helper".to_string()),
+                    need_refetch_channels_cookie: None,
+                    is_rate_limited: Some(is_rate_limited),
+                });
+            }
+
+            let response_data = &result["data"];
+
+            // 2. 检查baseResp（Cookie认证结果）
+            let base_resp = &response_data["baseResp"];
+            let base_errcode = base_resp["errcode"].as_i64().unwrap_or(-1);
+
+            if base_errcode != 0 {
+                let err_msg = base_resp["errmsg"].as_str().unwrap_or("Cookie无效");
+                println!("[视频号助手] Cookie认证失败: {}", err_msg);
+
+                return Ok(CookieValidationResult {
+                    valid: false,
+                    cookie_status: "offline".to_string(),
+                    nickname: None,
+                    avatar: None,
+                    wechat_id: None,
+                    finder_username: None,
+                    appuin: None,
+                    shop_name: None,
+                    account_state: None,
+                    error: Some(format!("Cookie无效: {}", err_msg)),
+                    login_method: Some("channels_helper".to_string()),
+                    need_refetch_channels_cookie: None,
+                    is_rate_limited: None,
+                });
+            }
+
+            // 3. Cookie有效，提取账号信息
+            let nickname = response_data["nickname"]
+                .as_str()
+                .unwrap_or("用户")
+                .to_string();
+
+            let avatar = response_data["headImg"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+
+            let username = response_data["username"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+
+            let account_state = response_data["state"].as_i64().unwrap_or(0);
+
+            println!(
+                "[视频号助手] ✓ Cookie有效: {}, 账号状态={}",
+                nickname, account_state
+            );
+
+            Ok(CookieValidationResult {
+                valid: true,
+                cookie_status: "online".to_string(),
+                nickname: Some(nickname),
+                avatar: Some(avatar),
+                wechat_id: None,
+                finder_username: Some(username),
+                appuin: None,
+                shop_name: None,
+                account_state: Some(account_state),  // ✅ 添加账号状态
+                error: None,
+                login_method: Some("channels_helper".to_string()),
+                need_refetch_channels_cookie: None,
+                is_rate_limited: None,
+            })
+        }
+        Err(e) => {
+            // 检查是否需要重试
+            let status_code = e.status().map(|s| s.as_u16()).unwrap_or(0);
+
+            // 401/403 表示Cookie无效，不重试
+            if status_code == 401 || status_code == 403 {
+                println!("[视频号助手] Cookie无效 (401/403)");
+                return Ok(CookieValidationResult {
+                    valid: false,
+                    cookie_status: "offline".to_string(),
+                    nickname: None,
+                    avatar: None,
+                    wechat_id: None,
+                    finder_username: None,
+                    appuin: None,
+                    shop_name: None,
+                    account_state: None,
+                    error: Some("Cookie已过期或无效".to_string()),
+                    login_method: Some("channels_helper".to_string()),
+                    need_refetch_channels_cookie: None,
+                    is_rate_limited: None,
+                });
+            }
+
+            // 429限流、500/502/503/504服务器错误 - 需要重试
+            let should_retry = status_code == 429
+                || status_code == 500
+                || status_code == 502
+                || status_code == 503
+                || status_code == 504
+                || e.is_timeout()
+                || status_code == 0;
+
+            if should_retry && retry_count < MAX_RETRIES {
+                let delay = RETRY_DELAY_MS * (retry_count as u64 + 1);
+                println!(
+                    "[视频号助手] API临时错误 ({}), {}ms后重试 ({}/{})",
+                    status_code,
+                    delay,
+                    retry_count + 1,
+                    MAX_RETRIES
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                // 使用Box::pin来处理异步递归
+                return Box::pin(validate_channels_helper_cookie(cookies, retry_count + 1)).await;
+            }
+
+            // 429 表示限流
+            if status_code == 429 {
+                return Ok(CookieValidationResult {
+                    valid: false,
+                    cookie_status: "offline".to_string(),
+                    nickname: None,
+                    avatar: None,
+                    wechat_id: None,
+                    finder_username: None,
+                    appuin: None,
+                    shop_name: None,
+                    account_state: None,
+                    error: Some("API限流".to_string()),
+                    login_method: Some("channels_helper".to_string()),
+                    need_refetch_channels_cookie: None,
+                    is_rate_limited: Some(true),
+                });
+            }
+
+            // 其他HTTP错误或重试次数用尽
+            if status_code > 0 {
+                println!(
+                    "[视频号助手] API返回错误: status={}, retry_count={}",
+                    status_code, retry_count
+                );
+                return Ok(CookieValidationResult {
+                    valid: false,
+                    cookie_status: "offline".to_string(),
+                    nickname: None,
+                    avatar: None,
+                    wechat_id: None,
+                    finder_username: None,
+                    appuin: None,
+                    shop_name: None,
+                    account_state: None,
+                    error: Some(format!("API错误({})", status_code)),
+                    login_method: Some("channels_helper".to_string()),
+                    need_refetch_channels_cookie: None,
+                    is_rate_limited: None,
+                });
+            }
+
+            // 网络错误或超时，重试次数用尽
+            println!(
+                "[视频号助手] 验证Cookie失败: {}, 重试次数: {}",
+                e, retry_count
+            );
+            Ok(CookieValidationResult {
+                valid: false,
+                cookie_status: "offline".to_string(),
+                nickname: None,
+                avatar: None,
+                wechat_id: None,
+                finder_username: None,
+                appuin: None,
+                shop_name: None,
+                account_state: None,
+                error: Some(format!("网络错误: {}", e)),
+                login_method: Some("channels_helper".to_string()),
+                need_refetch_channels_cookie: None,
+                is_rate_limited: None,
+            })
+        }
+    }
+}
+
+/// 验证带货助手Cookie（带重试机制）
+async fn validate_shop_helper_cookie(
+    cookies: &[CookieItem],
+    retry_count: u32,
+) -> Result<CookieValidationResult, String> {
+    const MAX_RETRIES: u32 = 3;
+    const RETRY_DELAY_MS: u64 = 2000;
+
+    let cookie_str = cookies
+        .iter()
+        .map(|c| format!("{}={}", c.name, c.value))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    // 提取talent_magic用于请求头
+    let talent_magic = cookies
+        .iter()
+        .find(|c| c.name == "talent_magic")
+        .map(|c| c.value.clone())
+        .unwrap_or_default();
+
+    let client = create_http_client_with_timeout(10)?;
+
+    if retry_count > 0 {
+        println!(
+            "[带货助手] 开始验证Cookie，重试次数: {}/{}",
+            retry_count, MAX_RETRIES
+        );
+    } else {
+        println!("[带货助手] 开始验证Cookie");
+    }
+
+    let url = "https://store.weixin.qq.com/shop-faas/mmeckolbasenode/base/getBindChannelList";
+
+    match client
+        .get(url)
+        .query(&[("token", ""), ("lang", "zh_CN")])
+        .header("Accept", "application/json, text/plain, */*")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .header("Cookie", &cookie_str)
+        .header("Referer", "https://store.weixin.qq.com/talent/channel/finder")
+        .header("talent_magic", &talent_magic)
+        .send()
+        .await
+    {
+        Ok(response) => {
+            let status = response.status();
+
+            // 401/403 表示Cookie无效，不重试
+            if status == 401 || status == 403 {
+                println!("[带货助手] Cookie无效 (401/403)");
+                return Ok(CookieValidationResult {
+                    valid: false,
+                    cookie_status: "offline".to_string(),
+                    nickname: None,
+                    avatar: None,
+                    wechat_id: None,
+                    finder_username: None,
+                    appuin: None,
+                    shop_name: None,
+                    account_state: None,
+                    error: Some("Cookie已过期或无效".to_string()),
+                    login_method: Some("shop_helper".to_string()),
+                    need_refetch_channels_cookie: None,
+                    is_rate_limited: None,
+                });
+            }
+
+            let result: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| format!("解析响应失败: {}", e))?;
+
+            println!("[带货助手] API响应: {:?}", result);
+
+            // 检查返回码
+            if result["code"].as_i64() != Some(0) {
+                let err_msg = result["msg"].as_str().unwrap_or("未知错误");
+                println!("[带货助手] 验证失败: {}", err_msg);
+
+                // 检查是否是限流错误
+                let err_code = result["code"].as_i64().unwrap_or(0);
+                let is_rate_limited = err_code == 45009
+                    || err_msg.contains("freq")
+                    || err_msg.contains("limit");
+
+                return Ok(CookieValidationResult {
+                    valid: false,
+                    cookie_status: "offline".to_string(),
+                    nickname: None,
+                    avatar: None,
+                    wechat_id: None,
+                    finder_username: None,
+                    appuin: None,
+                    shop_name: None,
+                    account_state: None,
+                    error: Some(err_msg.to_string()),
+                    login_method: Some("shop_helper".to_string()),
+                    need_refetch_channels_cookie: None,
+                    is_rate_limited: Some(is_rate_limited),
+                });
+            }
+
+            // 从绑定的视频号列表中获取信息
+            let finder_list = result["data"]["finderList"]
+                .as_array()
+                .or_else(|| result["finderList"].as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            println!("[带货助手] 绑定的视频号列表: {:?}", finder_list);
+
+            // ✅ 注意：带货助手账号的视频号Cookie不存储在BitBrowser，而是存储在云端数据库
+            // 因此这里不检查BitBrowser里的视频号Cookie，needRefetch由前端根据数据库判断
+
+            if !finder_list.is_empty() {
+                let finder_info = &finder_list[0];
+                println!("[带货助手] 第一个视频号信息: {:?}", finder_info);
+
+                return Ok(CookieValidationResult {
+                    valid: true,
+                    cookie_status: "online".to_string(),
+                    nickname: finder_info["nickname"]
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .or(Some("带货用户".to_string())),
+                    avatar: finder_info["headImgUrl"]
+                        .as_str()
+                        .map(|s| s.to_string()),
+                    wechat_id: None,
+                    finder_username: finder_info["finderUsername"]
+                        .as_str()
+                        .map(|s| s.to_string()),
+                    appuin: finder_info["finderUniqId"]
+                        .as_str()
+                        .or(finder_info["finderUsername"].as_str())
+                        .map(|s| s.to_string()),
+                    shop_name: None,
+                    account_state: None,
+                    error: None,
+                    login_method: Some("shop_helper".to_string()),
+                    need_refetch_channels_cookie: None,  // ✅ 由前端根据数据库判断
+                    is_rate_limited: None,
+                });
+            }
+
+            // 如果没有绑定视频号，Cookie仍然有效，但没有视频号信息
+            println!("[带货助手] 未绑定视频号，但Cookie有效");
+            Ok(CookieValidationResult {
+                valid: true,
+                cookie_status: "online".to_string(),
+                nickname: Some("暂未绑定视频号".to_string()),
+                avatar: None,
+                wechat_id: None,
+                finder_username: Some("".to_string()),
+                appuin: Some("".to_string()),
+                shop_name: None,
+                account_state: None,
+                error: None,
+                login_method: Some("shop_helper".to_string()),
+                need_refetch_channels_cookie: None,  // ✅ 由前端根据数据库判断
+                is_rate_limited: None,
+            })
+        }
+        Err(e) => {
+            // 检查是否需要重试
+            let status_code = e.status().map(|s| s.as_u16()).unwrap_or(0);
+
+            // 401/403 表示Cookie无效，不重试
+            if status_code == 401 || status_code == 403 {
+                println!("[带货助手] Cookie无效 (401/403)");
+                return Ok(CookieValidationResult {
+                    valid: false,
+                    cookie_status: "offline".to_string(),
+                    nickname: None,
+                    avatar: None,
+                    wechat_id: None,
+                    finder_username: None,
+                    appuin: None,
+                    shop_name: None,
+                    account_state: None,
+                    error: Some("Cookie已过期或无效".to_string()),
+                    login_method: Some("shop_helper".to_string()),
+                    need_refetch_channels_cookie: None,
+                    is_rate_limited: None,
+                });
+            }
+
+            // 429限流、500/502/503/504服务器错误 - 需要重试
+            let should_retry = status_code == 429
+                || status_code == 500
+                || status_code == 502
+                || status_code == 503
+                || status_code == 504
+                || e.is_timeout()
+                || status_code == 0;
+
+            if should_retry && retry_count < MAX_RETRIES {
+                let delay = RETRY_DELAY_MS * (retry_count as u64 + 1);
+                println!(
+                    "[带货助手] API临时错误 ({}), {}ms后重试 ({}/{})",
+                    status_code,
+                    delay,
+                    retry_count + 1,
+                    MAX_RETRIES
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                // 使用Box::pin来处理异步递归
+                return Box::pin(validate_shop_helper_cookie(cookies, retry_count + 1)).await;
+            }
+
+            // 429 表示限流
+            if status_code == 429 {
+                return Ok(CookieValidationResult {
+                    valid: false,
+                    cookie_status: "offline".to_string(),
+                    nickname: None,
+                    avatar: None,
+                    wechat_id: None,
+                    finder_username: None,
+                    appuin: None,
+                    shop_name: None,
+                    account_state: None,
+                    error: Some("API限流".to_string()),
+                    login_method: Some("shop_helper".to_string()),
+                    need_refetch_channels_cookie: None,
+                    is_rate_limited: Some(true),
+                });
+            }
+
+            // 其他HTTP错误或重试次数用尽
+            if status_code > 0 {
+                println!(
+                    "[带货助手] API返回错误: status={}, retry_count={}",
+                    status_code, retry_count
+                );
+                return Ok(CookieValidationResult {
+                    valid: false,
+                    cookie_status: "offline".to_string(),
+                    nickname: None,
+                    avatar: None,
+                    wechat_id: None,
+                    finder_username: None,
+                    appuin: None,
+                    shop_name: None,
+                    account_state: None,
+                    error: Some(format!("API错误({})", status_code)),
+                    login_method: Some("shop_helper".to_string()),
+                    need_refetch_channels_cookie: None,
+                    is_rate_limited: None,
+                });
+            }
+
+            // 网络错误或超时，重试次数用尽
+            println!(
+                "[带货助手] 验证Cookie失败: {}, 重试次数: {}",
+                e, retry_count
+            );
+            Ok(CookieValidationResult {
+                valid: false,
+                cookie_status: "offline".to_string(),
+                nickname: None,
+                avatar: None,
+                wechat_id: None,
+                finder_username: None,
+                appuin: None,
+                shop_name: None,
+                account_state: None,
+                error: Some(format!("网络错误: {}", e)),
+                login_method: Some("shop_helper".to_string()),
+                need_refetch_channels_cookie: None,
+                is_rate_limited: None,
+            })
+        }
+    }
+}
+
 // 获取下一个浏览器序号
 async fn get_next_browser_seq(client: &reqwest::Client) -> Result<i64, String> {
     let base_url = get_bb_api_url().await?;
@@ -940,7 +1647,7 @@ async fn create_browser_with_account(
     config: serde_json::Value,
     cookie: String,
     nickname: Option<String>,
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let client = create_http_client();
 
@@ -1558,7 +2265,6 @@ async fn get_browser_cookies(browser_id: String) -> Result<ApiResponse, String> 
 /// 同步插件文件从 resources 到 exe 同目录（用于热更新后更新插件）
 fn sync_plugin_from_resources(app: &tauri::AppHandle) -> Result<(), String> {
     use std::fs;
-    use std::path::PathBuf;
 
     // 获取 resource_dir (热更新会更新这里的文件)
     let resource_dir = app
@@ -1643,7 +2349,10 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
 
 // 获取插件路径
 #[tauri::command]
-fn get_plugin_path(app: tauri::AppHandle) -> Result<String, String> {
+fn get_plugin_path(
+    #[allow(unused_variables)]  // app只在生产环境使用
+    app: tauri::AppHandle
+) -> Result<String, String> {
     // 统一从 exe 同目录下的 browser-extension 文件夹获取
     // 开发环境：target/debug/browser-extension
     // 生产环境：C:\Program Files\视频号工具箱\browser-extension
@@ -1823,6 +2532,7 @@ fn main() {
             check_qr_status,
             create_browser_with_account,
             sync_cookie_to_browser,
+            validate_cookie,
             // 账号管理命令
             get_group_list,
             get_browser_list,

@@ -19,6 +19,7 @@ const API_ENDPOINTS = {
   CHECK_ACCOUNT_STATUS: `${CLOUD_SERVICE_URL}/api/status?action=account`,
   BATCH_CHECK_STATUS: `${CLOUD_SERVICE_URL}/api/status?action=batch`,
   INSTANT_VALIDATE: `${CLOUD_SERVICE_URL}/api/validate?action=instant`,
+  REPORT_VALIDATION: `${CLOUD_SERVICE_URL}/api/report-validation`,
   DELETE_LINK: `${CLOUD_SERVICE_URL}/api/admin?action=delete-link`,
   DELETE_LINK_BY_BROWSER: `${CLOUD_SERVICE_URL}/api/admin?action=delete-by-browser`,
   CLEANUP_ORPHAN_LINKS: `${CLOUD_SERVICE_URL}/api/admin?action=cleanup-orphan`
@@ -73,6 +74,8 @@ export interface AccountCookieStatus {
   cookieExpiredAt: string | null;  // Cookie失效时间
   checkErrorCount: number;
   channelsJumpUrl?: string | null;  // ✅ 视频号跳转链接缓存
+  channelsSessionid?: string | null;  // ✅ 视频号Cookie: sessionid
+  channelsWxuin?: string | null;      // ✅ 视频号Cookie: wxuin
   accountInfo: {
     nickname: string;
     avatar: string;
@@ -81,6 +84,7 @@ export interface AccountCookieStatus {
     finderUsername?: string;
     appuin?: string;
     shopName?: string;
+    accountState?: number;  // 账号状态: 0=正常, 1=异常/违规
   } | null;
 }
 
@@ -479,6 +483,44 @@ export class CloudService {
     } catch (error: any) {
       console.error('[CloudService] 即时验证失败:', error);
       return null;
+    }
+  }
+
+  /**
+   * 上报本地验证结果到云端
+   * 用于本地验证Cookie后，将结果同步到云端数据库
+   */
+  static async reportValidationResult(browserId: string, result: {
+    valid: boolean;
+    nickname?: string;
+    avatar?: string;
+    accountState?: number;  // 账号状态: 0=正常, 1=异常/违规
+    error?: string;
+    needRefetchChannelsCookie?: boolean;
+  }): Promise<boolean> {
+    try {
+      console.log('[CloudService] 上报验证结果:', browserId, result.valid ? '有效' : '失效');
+
+      // 获取当前用户名（用于多用户隔离）
+      const { configStore } = await import('@/utils/config-store');
+      const owner = await configStore.getUsername();
+
+      const response = await axios.post(API_ENDPOINTS.REPORT_VALIDATION, {
+        browserId,
+        owner,
+        result
+      });
+
+      if (!response.data.success) {
+        console.error('[CloudService] 上报失败:', response.data.error);
+        return false;
+      }
+
+      console.log('[CloudService] 验证结果上报成功');
+      return true;
+    } catch (error: any) {
+      console.error('[CloudService] 上报验证结果失败:', error);
+      return false;
     }
   }
 }
