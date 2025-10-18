@@ -941,11 +941,21 @@ struct CookieItem {
 ///
 /// ✅ 修复：接受 login_method 参数，不再通过Cookie名称检测
 /// login_method 来自云端数据库，是权威来源
+///
+/// ✅ 智能降级验证：
+/// - 视频号助手：本地验证（轻量级API）
+/// - 带货助手：调用云端智能验证API（优先视频号Cookie，降级带货助手Cookie）
 #[tauri::command]
 async fn validate_cookie(browser_id: String, login_method: String) -> Result<serde_json::Value, String> {
     println!("[验证Cookie] 开始验证浏览器: {}, 登录方式: {}", browser_id, login_method);
 
-    // 1. 获取浏览器Cookie
+    // ✅ 带货助手：调用云端智能验证API（支持降级策略）
+    if login_method == "shop_helper" {
+        println!("[验证Cookie] 带货助手账号，调用云端智能验证API");
+        return validate_shop_helper_via_cloud(browser_id).await;
+    }
+
+    // 1. 获取浏览器Cookie（视频号助手本地验证）
     let cookies_result = get_browser_cookies(browser_id.clone()).await?;
 
     if !cookies_result.success {
@@ -975,20 +985,92 @@ async fn validate_cookie(browser_id: String, login_method: String) -> Result<ser
 
     println!("[验证Cookie] 获取到 {} 个Cookie", cookies.len());
 
-    // 2. 根据登录方式验证（不再自动检测，使用传入的参数）
-    let result = match login_method.as_str() {
-        "channels_helper" => validate_channels_helper_cookie(&cookies, 0).await?,
-        "shop_helper" => validate_shop_helper_cookie(&cookies, 0).await?,
-        _ => {
-            return Ok(serde_json::json!({
-                "valid": false,
-                "cookieStatus": "offline",
-                "error": "不支持的登录方式"
-            }));
-        }
-    };
+    // 2. 视频号助手：本地验证
+    let result = validate_channels_helper_cookie(&cookies, 0).await?;
 
     Ok(serde_json::to_value(result).unwrap())
+}
+
+/// 通过云端API验证带货助手账号（智能降级验证）
+///
+/// 云端会：
+/// 1. 从数据库获取带货助手Cookie和视频号Cookie
+/// 2. 优先使用视频号Cookie验证（轻量级API）
+/// 3. 失败则降级使用带货助手Cookie验证
+/// 4. 返回needRefetchChannelsCookie标志（如果需要重新获取视频号Cookie）
+async fn validate_shop_helper_via_cloud(browser_id: String) -> Result<serde_json::Value, String> {
+    // 从环境变量获取云端API地址
+    let cloud_api_url = std::env::var("VITE_CLOUD_SERVICE_URL")
+        .unwrap_or_else(|_| "https://api.quanyuge.cloud".to_string());
+
+    // 从本地配置获取owner
+    let owner = get_config_value("username").unwrap_or_default();
+
+    let url = format!("{}/api/validate?action=instant", cloud_api_url);
+
+    let client = create_http_client_with_timeout(30)?;
+
+    println!("[云端智能验证] 调用API: {}", url);
+
+    match client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "browserId": browser_id,
+            "owner": owner
+        }))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            let status = response.status();
+
+            if !response.status().is_success() {
+                println!("[云端智能验证] API返回错误: status={}", status);
+                return Ok(serde_json::json!({
+                    "valid": false,
+                    "cookieStatus": "offline",
+                    "error": format!("云端验证失败: HTTP {}", status)
+                }));
+            }
+
+            let result: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| format!("解析响应失败: {}", e))?;
+
+            println!("[云端智能验证] API响应: {:?}", result);
+
+            if !result["success"].as_bool().unwrap_or(false) {
+                return Ok(serde_json::json!({
+                    "valid": false,
+                    "cookieStatus": "offline",
+                    "error": result["error"].as_str().unwrap_or("云端验证失败")
+                }));
+            }
+
+            // 提取验证结果
+            let data = &result["data"];
+            Ok(serde_json::json!({
+                "valid": data["valid"].as_bool().unwrap_or(false),
+                "cookieStatus": data["cookieStatus"].as_str().unwrap_or("offline"),
+                "nickname": data["nickname"],
+                "avatar": data["avatar"],
+                "error": data["error"],
+                "loginMethod": "shop_helper",
+                "needRefetchChannelsCookie": data["needRefetchChannelsCookie"],
+                "isRateLimited": data["isRateLimited"]
+            }))
+        }
+        Err(e) => {
+            println!("[云端智能验证] 请求失败: {}", e);
+            Ok(serde_json::json!({
+                "valid": false,
+                "cookieStatus": "offline",
+                "error": format!("网络错误: {}", e)
+            }))
+        }
+    }
 }
 
 /// 识别登录方式
