@@ -1003,8 +1003,8 @@ async fn validate_shop_helper_via_cloud(browser_id: String) -> Result<serde_json
     let cloud_api_url = std::env::var("VITE_CLOUD_SERVICE_URL")
         .unwrap_or_else(|_| "https://api.quanyuge.cloud".to_string());
 
-    // 从本地配置获取owner
-    let owner = get_config_value("username").unwrap_or_default();
+    // owner参数留空（云端会从数据库查询验证）
+    let owner = String::from("");
 
     let url = format!("{}/api/validate?action=instant", cloud_api_url);
 
