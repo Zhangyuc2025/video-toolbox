@@ -946,13 +946,17 @@ struct CookieItem {
 /// - 视频号助手：本地验证（轻量级API）
 /// - 带货助手：调用云端智能验证API（优先视频号Cookie，降级带货助手Cookie）
 #[tauri::command]
-async fn validate_cookie(browser_id: String, login_method: String) -> Result<serde_json::Value, String> {
+async fn validate_cookie(
+    browser_id: String,
+    login_method: String,
+    state: tauri::State<'_, config_manager::ConfigManager>
+) -> Result<serde_json::Value, String> {
     println!("[验证Cookie] 开始验证浏览器: {}, 登录方式: {}", browser_id, login_method);
 
     // ✅ 带货助手：调用云端智能验证API（支持降级策略）
     if login_method == "shop_helper" {
         println!("[验证Cookie] 带货助手账号，调用云端智能验证API");
-        return validate_shop_helper_via_cloud(browser_id).await;
+        return validate_shop_helper_via_cloud(browser_id, state).await;
     }
 
     // 1. 获取浏览器Cookie（视频号助手本地验证）
@@ -998,13 +1002,16 @@ async fn validate_cookie(browser_id: String, login_method: String) -> Result<ser
 /// 2. 优先使用视频号Cookie验证（轻量级API）
 /// 3. 失败则降级使用带货助手Cookie验证
 /// 4. 返回needRefetchChannelsCookie标志（如果需要重新获取视频号Cookie）
-async fn validate_shop_helper_via_cloud(browser_id: String) -> Result<serde_json::Value, String> {
+async fn validate_shop_helper_via_cloud(
+    browser_id: String,
+    state: tauri::State<'_, config_manager::ConfigManager>
+) -> Result<serde_json::Value, String> {
     // 从环境变量获取云端API地址
     let cloud_api_url = std::env::var("VITE_CLOUD_SERVICE_URL")
         .unwrap_or_else(|_| "https://api.quanyuge.cloud".to_string());
 
-    // owner参数留空（云端会从数据库查询验证）
-    let owner = String::from("");
+    // 从本地配置获取owner
+    let owner = state.get_string("username").unwrap_or_default();
 
     let url = format!("{}/api/validate?action=instant", cloud_api_url);
 
