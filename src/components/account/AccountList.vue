@@ -305,32 +305,26 @@ const handleOpenBrowser = async (browserId: string) => {
       // ✅ Cookie有效，允许打开
       console.log(`[打开浏览器] Cookie验证通过 - ${browserId}`);
 
-      // ⚠️ 对于带货助手账号，检查云端数据库是否有视频号Cookie
+      // ⚠️ 对于带货助手账号，智能检测是否需要获取视频号Cookie
       if (loginMethod === 'shop_helper') {
-        try {
-          const accountStatus = await CloudService.checkAccountStatus(browserId);
-          const hasChannelsCookie = accountStatus?.channelsSessionid && accountStatus?.channelsWxuin;
+        // ✅ 优先使用智能验证返回的标志（更准确）
+        if (validationResult.needRefetchChannelsCookie) {
+          console.log(`[打开浏览器] ⚠️ 智能验证提示需要重新获取视频号Cookie - ${browserId}`);
+          notification.info(`带货助手Cookie正常，打开后将自动获取视频号Cookie`, {
+            title: `#${browserSeq} ${accountName}`,
+            duration: 3000
+          });
 
-          if (!hasChannelsCookie) {
-            console.log(`[打开浏览器] ⚠️ 云端数据库无视频号Cookie，需要重新获取 - ${browserId}`);
-            notification.info(`带货助手Cookie正常，打开后将自动获取视频号Cookie`, {
-              title: `#${browserSeq} ${accountName}`,
-              duration: 3000
+          // 稍后自动获取视频号Cookie
+          setTimeout(() => {
+            autoFetchChannelsCookie({
+              browserId,
+              nickname: accountName,
+              skipOpen: true
             });
-
-            // 稍后自动获取视频号Cookie
-            setTimeout(() => {
-              autoFetchChannelsCookie({
-                browserId,
-                nickname: accountName,
-                skipOpen: true
-              });
-            }, 2000);
-          } else {
-            console.log(`[打开浏览器] ✅ 云端数据库已有视频号Cookie，无需重新获取 - ${browserId}`);
-          }
-        } catch (error) {
-          console.error(`[打开浏览器] 检查视频号Cookie失败:`, error);
+          }, 2000);
+        } else {
+          console.log(`[打开浏览器] ✅ 视频号Cookie正常，无需重新获取 - ${browserId}`);
         }
       }
     } catch (error) {
