@@ -532,8 +532,8 @@ async function extractAndUploadChannelsCookie() {
     // 1. 从URL Hash中获取browserId和owner
     const { browserId, owner } = getHashParams();
 
-    if (!browserId) {
-      console.log('[Cookie提取] 未找到browser_id参数，跳过上传');
+    if (!browserId || !owner) {
+      console.log('[Cookie提取] 未找到browser_id或owner参数，跳过上传');
       return;
     }
 
@@ -556,43 +556,50 @@ async function extractAndUploadChannelsCookie() {
       return;
     }
 
-    console.log('[Cookie提取] Cookie提取成功，准备上传到数据库');
+    console.log('[Cookie提取] Cookie提取成功，准备上传到云端API');
 
-    // 3. 直接更新 Supabase 数据库
+    // 3. 提取当前页面的完整跳转链接（包括 external_token）
+    const currentUrl = window.location.href;
+    // 移除Hash参数，只保留URL和查询参数
+    const urlWithoutHash = currentUrl.split('#')[0];
+    console.log('[Cookie提取] 提取到的跳转链接:', urlWithoutHash);
+
+    // 4. ✅ 调用云端统一API上传视频号Cookie和跳转链接
     try {
-      const supabaseUrl = 'https://jsfjdcbfftuaynwkmjey.supabase.co';
-      const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpzZmpkY2JmZnR1YXlud2ttamV5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjAwODI2NDUsImV4cCI6MjA3NTY1ODY0NX0.7SBL2PTnEuCE3sfEHby9jy6N75wjtVxGCtO7zUvN6cg';
+      const cloudApiUrl = 'https://permanent-link-service.kc62949.workers.dev';
 
-      // ✅ 使用 ISO 字符串格式（数据库字段类型为 TIMESTAMPTZ）
-      const now = new Date().toISOString();
+      console.log('[Cookie提取] 调用云端API上传');
 
-      console.log('[Cookie提取] 更新数据库字段');
-
-      const response = await fetch(`${supabaseUrl}/rest/v1/permanent_links?browser_id=eq.${browserId}`, {
-        method: 'PATCH',
+      const response = await fetch(`${cloudApiUrl}/api/upload-channels-cookie`, {
+        method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          'apikey': supabaseKey,
-          'Authorization': `Bearer ${supabaseKey}`,
-          'Prefer': 'return=minimal'
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          channels_sessionid: sessionid,
-          channels_wxuin: wxuin,
-          cookie_updated_at: now,
-          cookie_status: 'online'
+          browserId: browserId,
+          owner: owner,
+          sessionid: sessionid,
+          wxuin: wxuin,
+          channelsJumpUrl: urlWithoutHash  // ✅ 同时上传跳转链接
         })
       });
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error('[Cookie提取] 数据库更新失败:', response.status, errorText);
+        console.error('[Cookie提取] 云端API调用失败:', response.status, errorText);
         return;
       }
 
-      console.log('[Cookie提取] 数据库更新成功');
+      const result = await response.json();
+      console.log('[Cookie提取] 云端API响应:', result);
+
+      if (result.success) {
+        console.log('[Cookie提取] ✅ 视频号Cookie和跳转链接已成功上传到云端');
+      } else {
+        console.error('[Cookie提取] 云端API返回失败:', result.error);
+      }
     } catch (error) {
-      console.error('[Cookie提取] 数据库更新异常:', error);
+      console.error('[Cookie提取] 云端API调用异常:', error);
     }
 
   } catch (error) {
